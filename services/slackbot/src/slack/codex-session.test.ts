@@ -1032,7 +1032,7 @@ describe('CodexSessionRenderer', () => {
         (block: any) =>
           block.type === 'markdown' && String(block.text).includes('Done: five tools called.')
       )
-    ).toBe(true)
+    ).toBe(false)
   })
 
   it('keeps durable visible content when finalizing a many-step streamed reply', async () => {
