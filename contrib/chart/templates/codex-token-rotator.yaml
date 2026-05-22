@@ -65,6 +65,9 @@ spec:
             - name: rotate
               image: "{{ .Values.codexTokenRotator.image.repository }}:{{ .Values.codexTokenRotator.image.tag }}"
               imagePullPolicy: {{ .Values.codexTokenRotator.image.pullPolicy }}
+              # env entries take precedence over envFrom, so OP_VAULT here
+              # overrides whatever is baked into centaur-infra-env. This lets
+              # the rotator read from its own vault independent of iron-proxy.
               env:
                 - name: NAMESPACE
                   valueFrom:
@@ -76,6 +79,8 @@ spec:
                   value: {{ .Values.codexTokenRotator.clientId | quote }}
                 - name: REFRESH_TOKEN_OP_ITEM
                   value: {{ .Values.codexTokenRotator.refreshTokenItem | quote }}
+                - name: OP_VAULT
+                  value: {{ .Values.codexTokenRotator.vault | quote }}
               envFrom:
                 - secretRef:
                     name: {{ include "centaur.secretEnvName" . }}
