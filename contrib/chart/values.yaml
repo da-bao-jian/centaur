@@ -117,7 +117,10 @@ sandbox:
 # iron-proxy substituting the access_token on chatgpt.com requests.
 codexTokenRotator:
   enabled: false
-  schedule: "0 6 * * *"
+  # ChatGPT-plan access_tokens expire within hours, so we rotate hourly. The
+  # earlier daily schedule led to silent codex timeouts once the cached token
+  # aged out. 1Password writes at 24/day are well below any practical limit.
+  schedule: "0 * * * *"
   clientId: "app_EMoamEEZ73f0CkXaXp7hrann"
   # 1Password vault that holds CODEX_REFRESH_TOKEN. Independent of the vault
   # iron-proxy reads other app secrets from.
