@@ -57,6 +57,13 @@ spec:
         spec:
           serviceAccountName: {{ $saName }}
           restartPolicy: Never
+          securityContext:
+            # nonroot user baked into the image (uid/gid 65532, "nobody").
+            # fsGroup ensures emptyDir mounts (/tmp, $HOME) are writable by
+            # the op CLI which insists on owning its session/config files.
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
 {{- with .Values.global.imagePullSecrets }}
           imagePullSecrets:
 {{ toYaml . | nindent 12 }}
@@ -79,11 +86,22 @@ spec:
                   value: {{ .Values.codexTokenRotator.clientId | quote }}
                 - name: REFRESH_TOKEN_OP_ITEM
                   value: {{ .Values.codexTokenRotator.refreshTokenItem | quote }}
+                - name: ACCESS_TOKEN_OP_ITEM
+                  value: {{ .Values.codexTokenRotator.accessTokenItem | quote }}
                 - name: OP_VAULT
                   value: {{ .Values.codexTokenRotator.vault | quote }}
+                # op CLI writes a session env file and config under $HOME — the
+                # default ($HOME=/) collides with readOnlyRootFilesystem.
+                - name: HOME
+                  value: /home/rotator
               envFrom:
                 - secretRef:
                     name: {{ include "centaur.secretEnvName" . }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: home
+                  mountPath: /home/rotator
               resources:
 {{ toYaml .Values.codexTokenRotator.resources | nindent 16 }}
               securityContext:
@@ -92,4 +110,9 @@ spec:
                 runAsNonRoot: true
                 capabilities:
                   drop: ["ALL"]
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: home
+              emptyDir: {}
 {{- end }}

@@ -13,19 +13,27 @@ postgres:
     existingSecretKey: POSTGRES_PASSWORD
 
 slackbot:
-  enabled: true
+  enabled: false
 
 api:
   executionWorkerEnabled: true
   egressDiscovery:
     enabled: false
+  image:
+    pullPolicy: IfNotPresent
+
+ironProxy:
+  image:
+    pullPolicy: IfNotPresent
+  manager:
+    secretSource: onepassword
+
+sandbox:
+  image:
+    pullPolicy: IfNotPresent
 
 laminar:
   enabled: true
-
-ironProxy:
-  manager:
-    secretSource: onepassword
 
 codexTokenRotator:
   enabled: true

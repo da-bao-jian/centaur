@@ -397,6 +397,29 @@ spec:
 {{- end }}
 ---
 {{- end }}
+{{- if .Values.codexTokenRotator.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "codex-token-rotator") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "codex-token-rotator") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "codex-token-rotator") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # Generic HTTPS egress covers the three destinations the rotator talks to:
+    # 1Password (my.1password.com via op CLI), OpenAI token endpoint
+    # (auth.openai.com), and the in-cluster K8s API (kubernetes.default.svc)
+    # for patching the secret.
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

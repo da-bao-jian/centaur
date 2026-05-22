@@ -12,6 +12,13 @@ RUN apt-get update \
     && chmod +x /usr/local/bin/op \
     && apt-get purge -y --auto-remove curl unzip
 
+# The op CLI walks getpwuid() to identify the "current user" before its
+# strict ownership checks on session/config dirs. Without a passwd entry,
+# the check spuriously fails even when files are owned by the running uid.
+RUN echo 'rotator:x:65532:65532::/home/rotator:/sbin/nologin' >> /etc/passwd \
+    && mkdir -p /home/rotator \
+    && chown 65532:65532 /home/rotator
+
 COPY services/codex-token-rotator/rotate.py /app/rotate.py
 
 USER 65532:65532

@@ -1,9 +1,12 @@
 """Rotate Codex ChatGPT-plan tokens.
 
-Exchanges the refresh_token at https://auth.openai.com/oauth/token, persists the
-rotated refresh_token back to 1Password, and patches the resulting access_token,
-id_token, and account_id into the centaur-infra-env Kubernetes Secret so the
-API container can pass them through to each sandbox via
+Exchanges the refresh_token at https://auth.openai.com/oauth/token, persists
+the rotated refresh_token *and* the fresh access_token back to 1Password, and
+patches the access_token, id_token, and account_id into the centaur-infra-env
+Kubernetes Secret. The access_token write to 1Password is what iron-proxy
+reads (``op://<vault>/<access_token_item>/credential``) to substitute the
+``Authorization`` header on outgoing chatgpt.com requests; the K8s Secret
+write carries the id_token and account_id through to sandboxes via
 KUBERNETES_SANDBOX_EXTRA_ENV.
 
 The cron is the *only* OAuth actor — iron-proxy just rewrites
@@ -20,6 +23,9 @@ Required env:
   REFRESH_TOKEN_OP_ITEM     1Password item holding the refresh_token
                             (default: CODEX_REFRESH_TOKEN). The credential
                             field is read and updated in place.
+  ACCESS_TOKEN_OP_ITEM      1Password item to update with the rotated
+                            access_token, read by iron-proxy
+                            (default: CODEX_CHATGPT_ACCESS_TOKEN).
 """
 
 from __future__ import annotations
@@ -151,6 +157,7 @@ def main() -> None:
     vault = _env("OP_VAULT", "ai-agents")
     client_id = _env("CODEX_CLIENT_ID", required=True)
     refresh_item = _env("REFRESH_TOKEN_OP_ITEM", "CODEX_REFRESH_TOKEN")
+    access_item = _env("ACCESS_TOKEN_OP_ITEM", "CODEX_CHATGPT_ACCESS_TOKEN")
     secret_name = _env("SECRET_NAME", "centaur-infra-env")
     namespace = _env("NAMESPACE") or (
         open(KUBE_NS_PATH, encoding="utf-8").read().strip()
@@ -177,6 +184,9 @@ def main() -> None:
         _write_op_credential(vault, refresh_item, new_refresh)
     else:
         log.info("refresh_token unchanged")
+
+    log.info("writing access_token to op://%s/%s/credential", vault, access_item)
+    _write_op_credential(vault, access_item, access_token)
 
     log.info("patching Secret %s/%s with access_token, id_token, account_id", namespace, secret_name)
     _patch_k8s_secret(

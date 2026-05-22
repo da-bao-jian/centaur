@@ -123,6 +123,10 @@ codexTokenRotator:
   # iron-proxy reads other app secrets from.
   vault: ai-agents
   refreshTokenItem: CODEX_REFRESH_TOKEN
+  # 1Password item updated each rotation with the fresh access_token. Iron-proxy
+  # reads op://<vault>/<accessTokenItem>/credential to substitute the
+  # Authorization header on chatgpt.com requests.
+  accessTokenItem: CODEX_CHATGPT_ACCESS_TOKEN
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   startingDeadlineSeconds: 600
