@@ -74,6 +74,12 @@ deploy:
         --set onepasswordConnect.connect.create=true
       )
     fi
+    # Auto-include the Slack overlay when present so `just deploy` doesn't
+    # silently disable slackbot (values.dev.yaml sets slackbot.enabled=false).
+    # The file's existence is the opt-in.
+    if [[ -f {{slack_values}} ]]; then
+      extra_args+=(-f {{slack_values}})
+    fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
 up:
