@@ -1634,19 +1634,18 @@ class ToolManager:
             hosts=("*.slack.com",),
             match_headers=("Authorization",),
         ),
-        # Codex CLI ChatGPT-plan auth: iron-proxy exchanges a long-lived refresh
-        # token for a short-lived access token and injects it as the
-        # Authorization header on requests to chatgpt.com. The sandbox never
-        # sees the refresh token or the access token.
-        OAuthTokenSecret(
-            name="CODEX_CHATGPT_REFRESH",
-            grant="refresh_token",
+        # Codex CLI ChatGPT-plan auth: iron-proxy rewrites the Authorization
+        # header on chatgpt.com requests by swapping the entrypoint-written
+        # placeholder for a fresh access_token that the codex-token-rotator
+        # CronJob mints daily. Doing the OAuth refresh from a single actor
+        # (the cron) avoids the concurrent-sandbox race where iron-proxy's
+        # in-process refresh_token rotation diverges from the source.
+        HttpSecret(
+            name="CODEX_CHATGPT_ACCESS_TOKEN",
+            secret_ref="CODEX_CHATGPT_ACCESS_TOKEN",
+            replacer="placeholder-iron-proxy-overwrites-authorization",
             hosts=("chatgpt.com",),
-            fields=(
-                ("refresh_token", OAuthFieldSource(secret_ref="CODEX_REFRESH_TOKEN")),
-                ("client_id", OAuthFieldSource(secret_ref="CODEX_CLIENT_ID")),
-            ),
-            token_endpoint="https://auth.openai.com/oauth/token",
+            match_headers=("Authorization",),
         ),
     ]
 

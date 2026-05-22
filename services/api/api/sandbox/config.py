@@ -27,6 +27,13 @@ _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_LAMINAR_BASE_URL",
     "LMNR_BASE_URL",
     "LMNR_PROJECT_API_KEY",
+    # ChatGPT-plan auth: the cron rotates id_token + account_id into
+    # centaur-infra-env (envFrom on the API container); these get copied
+    # into each sandbox so codex can build the Chatgpt-Account-Id header.
+    # iron-proxy provides the real Authorization independently.
+    "CODEX_USE_CHATGPT_AUTH",
+    "CODEX_CHATGPT_ID_TOKEN",
+    "CODEX_CHATGPT_ACCOUNT_ID",
 )
 
 # Keep Claude Code deterministic in the pod while still allowing Centaur-owned
