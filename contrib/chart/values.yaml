@@ -109,6 +109,33 @@ sandbox:
       cpu: 100m
       memory: 512Mi
 
+# Rotates Codex CLI's ChatGPT-plan OAuth tokens. The CronJob exchanges
+# CODEX_REFRESH_TOKEN (stored in 1Password) at auth.openai.com, writes the
+# rotated refresh_token back to 1Password, and patches the resulting
+# access_token + id_token + account_id into centaur-infra-env. Sandboxes
+# read those values via envFrom and pass them through to codex, with
+# iron-proxy substituting the access_token on chatgpt.com requests.
+codexTokenRotator:
+  enabled: false
+  schedule: "0 6 * * *"
+  clientId: "app_EMoamEEZ73f0CkXaXp7hrann"
+  refreshTokenItem: CODEX_REFRESH_TOKEN
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  backoffLimit: 2
+  image:
+    repository: centaur-codex-token-rotator
+    tag: latest
+    pullPolicy: Always
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
 repoCache:
   enabled: false
   hostPath: /var/lib/centaur/repos

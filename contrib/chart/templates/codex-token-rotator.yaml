@@ -1,0 +1,90 @@
+{{- if .Values.codexTokenRotator.enabled }}
+{{- $component := "codex-token-rotator" }}
+{{- $saName := include "centaur.componentName" (dict "root" . "component" $component) }}
+{{- $roleName := include "centaur.componentName" (dict "root" . "component" (printf "%s-secret-patcher" $component)) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $saName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $roleName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ include "centaur.secretEnvName" . | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $roleName }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $roleName }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" $component) }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" $component) | nindent 4 }}
+spec:
+  schedule: {{ .Values.codexTokenRotator.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.codexTokenRotator.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.codexTokenRotator.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.codexTokenRotator.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.codexTokenRotator.backoffLimit }}
+      template:
+        metadata:
+          labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" $component) | nindent 12 }}
+        spec:
+          serviceAccountName: {{ $saName }}
+          restartPolicy: Never
+{{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+{{ toYaml . | nindent 12 }}
+{{- end }}
+          containers:
+            - name: rotate
+              image: "{{ .Values.codexTokenRotator.image.repository }}:{{ .Values.codexTokenRotator.image.tag }}"
+              imagePullPolicy: {{ .Values.codexTokenRotator.image.pullPolicy }}
+              env:
+                - name: NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: SECRET_NAME
+                  value: {{ include "centaur.secretEnvName" . | quote }}
+                - name: CODEX_CLIENT_ID
+                  value: {{ .Values.codexTokenRotator.clientId | quote }}
+                - name: REFRESH_TOKEN_OP_ITEM
+                  value: {{ .Values.codexTokenRotator.refreshTokenItem | quote }}
+              envFrom:
+                - secretRef:
+                    name: {{ include "centaur.secretEnvName" . }}
+              resources:
+{{ toYaml .Values.codexTokenRotator.resources | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+{{- end }}
