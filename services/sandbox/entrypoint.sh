@@ -199,9 +199,32 @@ fi
 
 # Codex reads its auth file when the app server starts. Complete this before
 # signaling readiness, otherwise warm pods can be claimed with no auth loaded.
-CODEX_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
-if [ -n "$CODEX_KEY" ]; then
-    echo "$CODEX_KEY" | codex login --with-api-key 2>/dev/null || true
+# ChatGPT-plan mode (preferred when set): write a stub auth.json that points
+# codex at ChatGPT. The access_token and refresh_token are placeholders —
+# iron-proxy mints and injects the real Authorization header for chatgpt.com
+# from a refresh_token held in its own secret store, so the sandbox never sees
+# the real tokens. The id_token is passed through because codex parses
+# chatgpt_account_id out of its JWT to build the Chatgpt-Account-Id header.
+if [ "${CODEX_USE_CHATGPT_AUTH:-}" = "1" ] && [ -n "${CODEX_CHATGPT_ID_TOKEN:-}" ]; then
+    cat > "$HOME_DIR/.codex/auth.json" <<EOF
+{
+  "auth_mode": "chatgpt",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "${CODEX_CHATGPT_ID_TOKEN}",
+    "access_token": "placeholder-iron-proxy-overwrites-authorization",
+    "refresh_token": "placeholder-iron-proxy-handles-refresh",
+    "account_id": "${CODEX_CHATGPT_ACCOUNT_ID:-}"
+  },
+  "last_refresh": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+    chmod 600 "$HOME_DIR/.codex/auth.json"
+else
+    CODEX_KEY="${CODEX_API_KEY:-${OPENAI_API_KEY:-}}"
+    if [ -n "$CODEX_KEY" ]; then
+        echo "$CODEX_KEY" | codex login --with-api-key 2>/dev/null || true
+    fi
 fi
 
 # Signal readiness

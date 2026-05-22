@@ -1589,9 +1589,9 @@ class ToolManager:
         )
         return loaded
 
-    # Hardcoded infrastructure secrets for the injection map. Each ``HttpSecret``
+    # Hardcoded infrastructure secrets for the injection map. Each secret
     # carries the hosts iron-proxy attaches it to.
-    _INFRA_SECRETS: ClassVar[list[HttpSecret]] = [
+    _INFRA_SECRETS: ClassVar[list[SecretDef]] = [
         HttpSecret(
             name="ANTHROPIC_API_KEY",
             secret_ref="ANTHROPIC_API_KEY",
@@ -1633,6 +1633,20 @@ class ToolManager:
             secret_ref="SLACK_BOT_TOKEN",
             hosts=("*.slack.com",),
             match_headers=("Authorization",),
+        ),
+        # Codex CLI ChatGPT-plan auth: iron-proxy exchanges a long-lived refresh
+        # token for a short-lived access token and injects it as the
+        # Authorization header on requests to chatgpt.com. The sandbox never
+        # sees the refresh token or the access token.
+        OAuthTokenSecret(
+            name="CODEX_CHATGPT_REFRESH",
+            grant="refresh_token",
+            hosts=("chatgpt.com",),
+            fields=(
+                ("refresh_token", OAuthFieldSource(secret_ref="CODEX_REFRESH_TOKEN")),
+                ("client_id", OAuthFieldSource(secret_ref="CODEX_CLIENT_ID")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
         ),
     ]
 
