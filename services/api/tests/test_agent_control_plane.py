@@ -55,9 +55,12 @@ async def _insert_assignment(db_pool, thread_key: str, generation: int = 1) -> N
 
 
 @pytest.mark.asyncio
-async def test_spawn_assignment_defaults_to_codex_when_no_selector(db_pool):
+async def test_spawn_assignment_defaults_to_codex_when_no_selector(
+    db_pool, monkeypatch
+):
     from api.runtime_control import spawn_assignment
 
+    monkeypatch.delenv("CENTAUR_DEFAULT_PERSONA", raising=False)
     thread_key = f"slack:C-test:{uuid.uuid4().hex}:default-codex"
     session = SandboxSession(
         sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
@@ -142,6 +145,134 @@ async def test_spawn_assignment_treats_harness_persona_selector_as_persona(db_po
     assert assignment["engine"] == "codex"
     assert assignment["persona_id"] == "legal"
     assert assignment["prompt_ref"] == "persona:legal"
+
+
+@pytest.mark.asyncio
+async def test_spawn_assignment_uses_centaur_default_persona_env_var(
+    db_pool, monkeypatch
+):
+    from api.runtime_control import spawn_assignment
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:default-persona-env"
+    session = SandboxSession(
+        sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
+        thread_key=thread_key,
+        harness="codex",
+        engine="codex",
+    )
+    get_or_spawn = AsyncMock(return_value=session)
+    tool_manager = SimpleNamespace(
+        get_persona=lambda name: (
+            SimpleNamespace(name="pris", engine="codex", default_repo=None)
+            if name == "pris"
+            else None
+        )
+    )
+    monkeypatch.setenv("CENTAUR_DEFAULT_PERSONA", "pris")
+
+    with (
+        patch("api.runtime_control.get_or_spawn", new=get_or_spawn),
+        patch("api.app.get_tool_manager", return_value=tool_manager),
+    ):
+        result = await spawn_assignment(
+            db_pool,
+            thread_key=thread_key,
+            spawn_id="spawn-default-persona",
+            harness=None,
+            engine=None,
+            persona_id=None,
+            agents_md_override=None,
+        )
+
+    get_or_spawn.assert_awaited_once_with(
+        thread_key, "codex", engine=None, persona="pris"
+    )
+    assert result["persona_id"] == "pris"
+    assert result["prompt_ref"] == "persona:pris"
+    assignment = await db_pool.fetchrow(
+        "SELECT harness, engine, persona_id, prompt_ref FROM agent_runtime_assignments WHERE thread_key = $1",
+        thread_key,
+    )
+    assert assignment is not None
+    assert assignment["harness"] == "codex"
+    assert assignment["persona_id"] == "pris"
+    assert assignment["prompt_ref"] == "persona:pris"
+
+
+@pytest.mark.asyncio
+async def test_spawn_assignment_ignores_unknown_default_persona_env_var(
+    db_pool, monkeypatch
+):
+    from api.runtime_control import spawn_assignment
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:default-persona-unknown"
+    session = SandboxSession(
+        sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
+        thread_key=thread_key,
+        harness="codex",
+        engine="codex",
+    )
+    get_or_spawn = AsyncMock(return_value=session)
+    tool_manager = SimpleNamespace(get_persona=lambda name: None)
+    monkeypatch.setenv("CENTAUR_DEFAULT_PERSONA", "no-such-persona")
+
+    with (
+        patch("api.runtime_control.get_or_spawn", new=get_or_spawn),
+        patch("api.app.get_tool_manager", return_value=tool_manager),
+    ):
+        result = await spawn_assignment(
+            db_pool,
+            thread_key=thread_key,
+            spawn_id="spawn-default-persona-unknown",
+            harness=None,
+            engine=None,
+            persona_id=None,
+            agents_md_override=None,
+        )
+
+    get_or_spawn.assert_awaited_once_with(thread_key, "codex", engine=None)
+    assert result["persona_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_spawn_assignment_explicit_persona_overrides_default_env_var(
+    db_pool, monkeypatch
+):
+    from api.runtime_control import spawn_assignment
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:default-persona-overridden"
+    session = SandboxSession(
+        sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
+        thread_key=thread_key,
+        harness="codex",
+        engine="codex",
+    )
+    get_or_spawn = AsyncMock(return_value=session)
+    tool_manager = SimpleNamespace(
+        get_persona=lambda name: SimpleNamespace(
+            name=name, engine="codex", default_repo=None
+        )
+    )
+    monkeypatch.setenv("CENTAUR_DEFAULT_PERSONA", "pris")
+
+    with (
+        patch("api.runtime_control.get_or_spawn", new=get_or_spawn),
+        patch("api.app.get_tool_manager", return_value=tool_manager),
+    ):
+        result = await spawn_assignment(
+            db_pool,
+            thread_key=thread_key,
+            spawn_id="spawn-explicit-persona",
+            harness=None,
+            engine=None,
+            persona_id="legal",
+            agents_md_override=None,
+        )
+
+    assert result["persona_id"] == "legal"
+    get_or_spawn.assert_awaited_once_with(
+        thread_key, "codex", engine=None, persona="legal"
+    )
 
 
 @pytest.mark.asyncio
@@ -269,6 +400,102 @@ async def test_reconcile_tick_reaps_only_stale_running_sessions_without_activity
     stopped_threads = {call.args[0].thread_key for call in backend.stop.await_args_list}
     assert stopped_threads == {stale_thread_key}
     drop_runtime.assert_called_once_with(stale_runtime_id)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tick_evicts_idle_sessions_over_capacity(db_pool, monkeypatch):
+    from api import agent as agent_module
+
+    thread_keys = [f"slack:C-test:{uuid.uuid4().hex}:idle-{idx}" for idx in range(3)]
+    runtime_ids = [f"rt-{uuid.uuid4().hex[:8]}" for _ in thread_keys]
+    for idx, (thread_key, runtime_id) in enumerate(zip(thread_keys, runtime_ids)):
+        await db_pool.execute(
+            "INSERT INTO sandbox_sessions ("
+            "thread_key, sandbox_id, harness, engine, state, started_at, updated_at"
+            ") VALUES ("
+            "$1, $2, 'amp', 'amp', 'idle', NOW(), "
+            "NOW() - ($3::int * INTERVAL '1 minute')"
+            ")",
+            thread_key,
+            runtime_id,
+            3 - idx,
+        )
+
+    backend = SimpleNamespace(
+        status_by_id=AsyncMock(return_value="running"),
+        stop=AsyncMock(),
+        stop_by_id=AsyncMock(),
+        list_containers=AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(agent_module, "MAX_ACTIVE_SANDBOX_SESSIONS", 2)
+    with (
+        patch("api.agent.get_backend", return_value=backend),
+        patch("api.agent._drop_runtime") as drop_runtime,
+    ):
+        await agent_module.reconcile_tick()
+
+    rows = await db_pool.fetch(
+        "SELECT thread_key, state FROM sandbox_sessions WHERE thread_key = ANY($1::text[])",
+        thread_keys,
+    )
+    states = {row["thread_key"]: row["state"] for row in rows}
+
+    assert states == {
+        thread_keys[0]: "suspended",
+        thread_keys[1]: "suspended",
+        thread_keys[2]: "idle",
+    }
+    assert [call.args[0] for call in backend.stop_by_id.await_args_list] == runtime_ids[:2]
+    assert [call.args[0] for call in drop_runtime.call_args_list] == runtime_ids[:2]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tick_prunes_orphan_backend_sandboxes(db_pool, monkeypatch):
+    from api import agent as agent_module
+
+    live_thread_key = f"slack:C-test:{uuid.uuid4().hex}:live"
+    suspended_thread_key = f"slack:C-test:{uuid.uuid4().hex}:suspended"
+    live_runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+    suspended_runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+    orphan_runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, started_at, updated_at"
+        ") VALUES "
+        "($1, $2, 'codex', 'codex', 'idle', NOW(), NOW()), "
+        "($3, $4, 'codex', 'codex', 'suspended', NOW(), NOW())",
+        live_thread_key,
+        live_runtime_id,
+        suspended_thread_key,
+        suspended_runtime_id,
+    )
+
+    backend = SimpleNamespace(
+        status_by_id=AsyncMock(return_value="running"),
+        stop=AsyncMock(),
+        stop_by_id=AsyncMock(),
+        list_containers=AsyncMock(return_value=[]),
+        list_managed_sandbox_ids=AsyncMock(
+            return_value=[live_runtime_id, suspended_runtime_id, orphan_runtime_id]
+        ),
+    )
+    monkeypatch.setattr(agent_module, "MAX_ACTIVE_SANDBOX_SESSIONS", 10)
+    with (
+        patch("api.agent.get_backend", return_value=backend),
+        patch("api.agent._drop_runtime") as drop_runtime,
+    ):
+        await agent_module.reconcile_tick()
+
+    backend.list_managed_sandbox_ids.assert_awaited_once_with(older_than_s=300)
+    assert [call.args[0] for call in backend.stop_by_id.await_args_list] == [
+        suspended_runtime_id,
+        orphan_runtime_id,
+    ]
+    assert [call.args[0] for call in drop_runtime.call_args_list] == [
+        suspended_runtime_id,
+        orphan_runtime_id,
+    ]
 
 
 @pytest.mark.asyncio

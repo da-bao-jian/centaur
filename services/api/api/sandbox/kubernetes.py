@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import hashlib
 import json
 import os
@@ -1428,6 +1429,67 @@ class KubernetesExecutorBackend(SandboxBackend):
         await self._delete_pod(sandbox_id)
         await self._delete_prompt_secret(_prompt_secret_name(sandbox_id))
         await self._delete_proxy_resources(sandbox_id)
+
+    async def list_managed_sandbox_ids(self, *, older_than_s: int = 0) -> list[str]:
+        await self._ensure_clients()
+        now = dt.datetime.now(dt.UTC)
+        sandbox_ids: set[str] = set()
+
+        def _old_enough(metadata: Any) -> bool:
+            created_at = getattr(metadata, "creation_timestamp", None)
+            if older_than_s <= 0 or created_at is None:
+                return True
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=dt.UTC)
+            return (now - created_at).total_seconds() >= older_than_s
+
+        try:
+            pod_list = await self._core_api().list_namespaced_pod(
+                _namespace(),
+                label_selector="centaur.ai/managed=true",
+            )
+        except Exception:
+            return []
+
+        for pod in getattr(pod_list, "items", []) or []:
+            metadata = getattr(pod, "metadata", None)
+            labels = getattr(metadata, "labels", None) or {}
+            sandbox_id = labels.get("centaur.ai/sandbox-id") or getattr(
+                metadata, "name", ""
+            )
+            if (
+                not sandbox_id
+                or sandbox_id == _API_PROXY_SANDBOX_ID
+                or labels.get("centaur.ai/warm") == "true"
+                or getattr(metadata, "deletion_timestamp", None) is not None
+            ):
+                continue
+
+            if _old_enough(metadata):
+                sandbox_ids.add(sandbox_id)
+
+        try:
+            proxy_pods = await self._core_api().list_namespaced_pod(
+                _namespace(),
+                label_selector=f"{_PROXY_LABEL}=true",
+            )
+        except Exception:
+            proxy_pods = None
+
+        for pod in getattr(proxy_pods, "items", []) or []:
+            metadata = getattr(pod, "metadata", None)
+            labels = getattr(metadata, "labels", None) or {}
+            sandbox_id = labels.get("centaur.ai/sandbox-id", "")
+            if (
+                not sandbox_id
+                or sandbox_id == _API_PROXY_SANDBOX_ID
+                or getattr(metadata, "deletion_timestamp", None) is not None
+            ):
+                continue
+            if _old_enough(metadata):
+                sandbox_ids.add(sandbox_id)
+
+        return sorted(sandbox_ids)
 
     async def interrupt_by_id(self, sandbox_id: str) -> None:
         with contextlib.suppress(Exception):

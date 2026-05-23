@@ -9,6 +9,10 @@ slack_pf_pid := "/tmp/centaur-slack-pf.pid"
 slack_tunnel_pid := "/tmp/centaur-slack-tunnel.pid"
 slack_tunnel_log := "/tmp/centaur-slack-tunnel.log"
 slack_local_port := "3001"
+overlay_values := "contrib/chart/values.overlay.yaml"
+overlay_dir := "../centaur-overlay"
+overlay_image := "centaur-overlay:latest"
+kind_cluster := env_var_or_default("KIND_CLUSTER", "centaur")
 
 default:
     just --list
@@ -80,6 +84,9 @@ deploy:
     if [[ -f {{slack_values}} ]]; then
       extra_args+=(-f {{slack_values}})
     fi
+    if [[ -f {{overlay_values}} ]]; then
+      extra_args+=(-f {{overlay_values}})
+    fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
 up:
@@ -105,6 +112,24 @@ slack-thread-logs slack_link since="24h":
 
 slack-thread-report slack_link:
     CENTAUR_NAMESPACE={{namespace}} CENTAUR_RELEASE={{release}} bash services/slackbot/scripts/slack-thread-report.sh "{{slack_link}}"
+
+# Build the org overlay image (centaur-overlay:latest) and load it into the
+# local kind cluster. The image is just a static carrier for the overlay
+# tree at /overlay; an initContainer copies it into the api/sandbox pods.
+overlay-build:
+    docker build -t {{overlay_image}} {{overlay_dir}}
+    kind load docker-image {{overlay_image}} --name {{kind_cluster}}
+
+# Build + load overlay, helm-upgrade so values.overlay.yaml gets picked up,
+# then rollout-restart the api so the new overlay reaches sandboxes spawned
+# after this point. Image tag is unchanged so helm won't restart on its own.
+overlay-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just overlay-build
+    just deploy
+    kubectl -n {{namespace}} rollout restart deploy/{{release}}-centaur-api
+    kubectl -n {{namespace}} rollout status  deploy/{{release}}-centaur-api --timeout=180s
 
 # Bring the local Slack integration online: ensure the slackbot Deployment
 # is helm-enabled and scaled to 1, then expose the webhook endpoint via a
@@ -301,23 +326,43 @@ smoke:
     set -euo pipefail
     THREAD_KEY="smoke-$(date +%s)"
     API_DEPLOY="deploy/{{release}}-centaur-api"
+    encoded_key="$(kubectl -n {{namespace}} get secret centaur-infra-env -o jsonpath='{.data.SLACKBOT_API_KEY}' 2>/dev/null || true)"
+    API_KEY=""
+    if [[ -n "$encoded_key" ]]; then
+      API_KEY="$(printf '%s' "$encoded_key" | base64 --decode 2>/dev/null || printf '%s' "$encoded_key" | base64 -D)"
+    fi
+    if [[ -z "$API_KEY" ]]; then
+      echo "SLACKBOT_API_KEY not found in centaur-infra-env" >&2
+      exit 2
+    fi
+    AUTH_ARGS=(-H "Authorization: Bearer ${API_KEY}")
+    ASSIGNMENT_GENERATION=""
+    cleanup() {
+      if [[ -n "${ASSIGNMENT_GENERATION:-}" ]]; then
+        kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST \
+          "http://localhost:8000/agent/threads/${THREAD_KEY}/release" \
+          -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
+          -d "{\"release_id\":\"smoke-${THREAD_KEY}\",\"cancel_inflight\":true}" >/dev/null || true
+      fi
+    }
+    trap cleanup EXIT
 
     SPAWN=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST http://localhost:8000/agent/spawn \
-      -H "Content-Type: application/json" \
+      -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
       -d "{\"thread_key\":\"${THREAD_KEY}\"}")
     ASSIGNMENT_GENERATION=$(printf '%s' "$SPAWN" | jq -r '.assignment_generation')
 
     kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST http://localhost:8000/agent/message \
-      -H "Content-Type: application/json" \
+      -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
       -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"Reply with exactly PONG and nothing else.\"}]}" >/dev/null
 
     EXECUTE=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s -X POST http://localhost:8000/agent/execute \
-      -H "Content-Type: application/json" \
+      -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
       -d "{\"thread_key\":\"${THREAD_KEY}\",\"assignment_generation\":${ASSIGNMENT_GENERATION},\"delivery\":{\"platform\":\"dev\"}}")
     EXECUTION_ID=$(printf '%s' "$EXECUTE" | jq -r '.execution_id')
 
     for _ in $(seq 1 60); do
-      STATE=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "http://localhost:8000/agent/executions/${EXECUTION_ID}")
+      STATE=$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "${AUTH_ARGS[@]}" "http://localhost:8000/agent/executions/${EXECUTION_ID}")
       STATUS=$(printf '%s' "$STATE" | jq -r '.status // empty')
       case "$STATUS" in
         completed)
@@ -333,6 +378,6 @@ smoke:
       sleep 2
     done
 
-    kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
+    kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "${AUTH_ARGS[@]}" "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
     echo "smoke timed out waiting for execution ${EXECUTION_ID}" >&2
     exit 1

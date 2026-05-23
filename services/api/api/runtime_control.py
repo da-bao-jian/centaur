@@ -464,6 +464,26 @@ async def spawn_assignment(
         effective_persona_id = active_assignment.get("persona_id")
         effective_agents_md_override = active_assignment.get("agents_md_override")
     else:
+        # When nothing was specified by the caller and no prior assignment
+        # exists for this thread, an operator-configured default persona
+        # acts as the implicit selection (e.g., overlay deployments that
+        # want every fresh thread to use a specific persona).
+        if attach_active_assignment and persona_info is None:
+            default_persona = (os.environ.get("CENTAUR_DEFAULT_PERSONA") or "").strip()
+            if default_persona:
+                from api.app import get_tool_manager
+
+                resolved_default = get_tool_manager().get_persona(default_persona)
+                if resolved_default is not None:
+                    persona_id = resolved_default.name
+                    persona_info = resolved_default
+                else:
+                    log.warning(
+                        "default_persona_unknown",
+                        configured=default_persona,
+                        thread_key=thread_key,
+                    )
+
         # Explicit harness wins; otherwise inherit from the persona's declared
         # engine; otherwise default to codex.
         if harness:

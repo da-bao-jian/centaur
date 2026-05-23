@@ -132,6 +132,10 @@ class SandboxBackend(abc.ABC):
         """Stop and remove a sandbox by ID (no session needed)."""
         raise NotImplementedError
 
+    async def list_managed_sandbox_ids(self, *, older_than_s: int = 0) -> list[str]:
+        """Return backend sandbox IDs managed by Centaur and old enough to prune."""
+        return []
+
     async def interrupt_by_id(self, sandbox_id: str) -> None:
         """Interrupt the active turn for a sandbox without destroying it."""
         raise NotImplementedError

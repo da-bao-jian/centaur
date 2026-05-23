@@ -19,6 +19,12 @@ api:
   executionWorkerEnabled: true
   egressDiscovery:
     enabled: false
+  extraEnv:
+    # Local kind has limited memory. Keep enough idle sandboxes for short
+    # follow-ups, but let the API reconcile loop free capacity automatically.
+    IDLE_TTL_S: "3600"
+    MAX_ACTIVE_SANDBOX_SESSIONS: "8"
+    ORPHAN_SANDBOX_TTL_S: "300"
   image:
     pullPolicy: IfNotPresent
 

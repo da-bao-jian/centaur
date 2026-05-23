@@ -91,6 +91,8 @@ _REUSABLE_DB_STATES = {"running", "idle", "delivering", "error", "suspended"}
 IDLE_TTL_S = int(os.getenv("IDLE_TTL_S", "86400"))  # 24 hours
 SUSPENDED_RETENTION_S = int(os.getenv("SUSPENDED_RETENTION_S", str(7 * 24 * 60 * 60)))
 MAX_ACTIVE_SANDBOX_SESSIONS = int(os.getenv("MAX_ACTIVE_SANDBOX_SESSIONS", "45"))
+ORPHAN_SANDBOX_TTL_S = int(os.getenv("ORPHAN_SANDBOX_TTL_S", "300"))
+ORPHAN_SANDBOX_CLEANUP_LIMIT = int(os.getenv("ORPHAN_SANDBOX_CLEANUP_LIMIT", "20"))
 STREAM_EOF_REATTACH_MAX = int(os.getenv("STREAM_EOF_REATTACH_MAX", "6"))
 STREAM_EOF_REATTACH_BACKOFF_S = float(os.getenv("STREAM_EOF_REATTACH_BACKOFF_S", "1.0"))
 
@@ -393,6 +395,52 @@ async def _evict_idle_sessions_for_capacity(backend) -> int:
                 exc_info=True,
             )
     return evicted
+
+
+async def _cleanup_orphan_backend_sandboxes(backend) -> int:
+    """Stop managed backend sandboxes that have no live DB session.
+
+    DB reconciliation covers rows that point to missing pods. This pass covers
+    the opposite direction: pods that survived while their session row was
+    already stopped, suspended, or removed.
+    """
+    if ORPHAN_SANDBOX_TTL_S <= 0 or ORPHAN_SANDBOX_CLEANUP_LIMIT <= 0:
+        return 0
+
+    list_managed = getattr(backend, "list_managed_sandbox_ids", None)
+    if not callable(list_managed):
+        return 0
+
+    sandbox_ids = await list_managed(older_than_s=ORPHAN_SANDBOX_TTL_S)
+    if not sandbox_ids:
+        return 0
+
+    pool = _get_pool()
+    rows = await pool.fetch(
+        "SELECT sandbox_id FROM sandbox_sessions "
+        "WHERE sandbox_id = ANY($1::text[]) "
+        "AND state IN ('running', 'idle', 'delivering', 'error')",
+        sandbox_ids,
+    )
+    live_ids = {row["sandbox_id"] for row in rows}
+    orphan_ids = [
+        sandbox_id for sandbox_id in sandbox_ids if sandbox_id not in live_ids
+    ][:ORPHAN_SANDBOX_CLEANUP_LIMIT]
+
+    cleaned = 0
+    for sandbox_id in orphan_ids:
+        try:
+            log.info("orphan_sandbox_cleanup", sandbox=sandbox_id[:12])
+            await backend.stop_by_id(sandbox_id)
+            _drop_runtime(sandbox_id)
+            cleaned += 1
+        except Exception:
+            log.warning(
+                "orphan_sandbox_cleanup_failed",
+                sandbox=sandbox_id[:12],
+                exc_info=True,
+            )
+    return cleaned
 
 
 # ── Wire lease helpers (separate from sandbox lifecycle) ─────────────────────
@@ -1581,7 +1629,30 @@ async def reconcile_tick() -> None:
                     exc_info=True,
                 )
 
-        # Step B: Idle TTL enforcement
+        # Step B: Backend orphan cleanup. This reaps pods that survived after
+        # their DB row was stopped, suspended, or removed.
+        try:
+            cleaned = await _cleanup_orphan_backend_sandboxes(backend)
+            if cleaned:
+                log.info("orphan_sandbox_cleanup_completed", cleaned=cleaned)
+        except Exception:
+            log.warning("orphan_sandbox_cleanup_reconcile_failed", exc_info=True)
+
+        # Step C: Capacity enforcement. The spawn path also does this just
+        # before creating a sandbox, but the reconcile loop keeps long-running
+        # local clusters from drifting into scheduler memory pressure.
+        try:
+            evicted = await _evict_idle_sessions_for_capacity(backend)
+            if evicted:
+                log.info(
+                    "idle_capacity_reconcile_completed",
+                    evicted=evicted,
+                    max_active=MAX_ACTIVE_SANDBOX_SESSIONS,
+                )
+        except Exception:
+            log.warning("idle_capacity_reconcile_failed", exc_info=True)
+
+        # Step D: Idle TTL enforcement
         idle_rows = await pool.fetch(
             "SELECT ss.thread_key, ss.sandbox_id FROM sandbox_sessions ss "
             "WHERE ss.state = 'idle' "

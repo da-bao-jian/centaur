@@ -227,17 +227,17 @@ else
     fi
 fi
 
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    # Keep the real token out of the sandbox. GITHUB_TOKEN is a placeholder
+    # that iron-proxy rewrites only for github.com/api.github.com requests.
+    git config --global --unset-all credential.helper 2>/dev/null || true
+    git config --global --replace-all \
+        http.https://github.com/.extraheader \
+        "Authorization: Bearer ${GITHUB_TOKEN}"
+    rm -f "$HOME_DIR/.git-credentials"
+fi
+
 # Signal readiness
 touch "$HOME_DIR/.ready"
-
-# ── Background: slow auth tasks ─────────────────────────────────────────────
-{
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-        git config --global credential.helper store
-        printf 'https://oauth2:%s@github.com\n' "$GITHUB_TOKEN" > "$HOME_DIR/.git-credentials"
-        echo "${GITHUB_TOKEN}" | gh auth login --with-token 2>/dev/null || true
-        gh auth setup-git 2>/dev/null || true
-    fi
-} &
 
 exec "$@"

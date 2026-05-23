@@ -89,6 +89,7 @@ api:
 overlay:
   mountPath: /app/overlay/org
   systemPrompt: ""
+  defaultPersona: ""
   image:
     repository: ""
     tag: ""

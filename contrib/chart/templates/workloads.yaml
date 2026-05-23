@@ -228,6 +228,10 @@ spec:
             - name: CENTAUR_OVERLAY_IMAGE_SOURCE_PATH
               value: {{ .Values.overlay.image.sourcePath | quote }}
 {{- end }}
+{{- if .Values.overlay.defaultPersona }}
+            - name: CENTAUR_DEFAULT_PERSONA
+              value: {{ .Values.overlay.defaultPersona | quote }}
+{{- end }}
             - name: AGENT_API_URL
               value: {{ printf "http://%s:8000" (include "centaur.componentName" (dict "root" . "component" "api")) | quote }}
             - name: FIREWALL_HOST
