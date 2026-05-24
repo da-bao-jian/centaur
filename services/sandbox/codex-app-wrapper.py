@@ -317,11 +317,7 @@ def start_or_resume_thread() -> str:
     global THREAD_ID
     if THREAD_ID:
         return THREAD_ID
-    resume = (
-        os.environ.get("CODEX_CONTINUE_THREAD_ID")
-        or os.environ.get("AMP_CONTINUE_THREAD_ID")
-        or ""
-    ).strip()
+    resume = (os.environ.get("CODEX_CONTINUE_THREAD_ID") or "").strip()
     if resume:
         result = request(
             "thread/resume", {"threadId": resume, "cwd": os.getcwd()}, timeout=60

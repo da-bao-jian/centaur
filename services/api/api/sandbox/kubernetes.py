@@ -1048,6 +1048,7 @@ class KubernetesExecutorBackend(SandboxBackend):
             thread_key,
             pod_name,
             firewall_host,
+            engine=engine,
             trace_id=trace_id,
             resume_thread_id=resume_thread_id,
             pg_dsns=sandbox_pg_dsns,
@@ -1057,8 +1058,6 @@ class KubernetesExecutorBackend(SandboxBackend):
             env.append(f"CENTAUR_OVERLAY_DIR={_SANDBOX_OVERLAY_DIR}")
         if engine == "claude-code" and model:
             env.append(f"CLAUDE_MODEL={model}")
-        if engine == "claude-code" and resume_thread_id:
-            env.append(f"CLAUDE_CONTINUE_SESSION_ID={resume_thread_id}")
         if persona:
             env.append(f"AGENT_PERSONA={persona}")
         if repo:

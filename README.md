@@ -147,6 +147,51 @@ just up
 
 After `just up` finishes, use Slack or the API examples in the [Developer Guide](AGENTS.md#e2e-testing-without-slack).
 
+## Local Slack Operations
+
+For local Slack development, Slack reaches the local stack through this path:
+
+```text
+Slack -> ngrok/cloudflared public URL -> 127.0.0.1:3001 -> kubectl port-forward -> slackbot service
+```
+
+Port `3001` is the private leg of the local tunnel. If it is not listening, ngrok logs errors like:
+
+```text
+failed to open private leg ... localhost:3001 connect: connection refused
+```
+
+Use the Slack recipes instead of starting `ngrok` or `kubectl port-forward` by hand:
+
+```bash
+just slack-up       # start or heal slackbot, port-forward, and tunnel
+just slack-watch    # keep checking and healing the local Slack path
+just slack-status   # inspect slackbot, local 3001, tunnel, and watcher health
+just slack-down     # stop watcher, tunnel, port-forward, and scale slackbot to 0
+```
+
+`just slack-up` and `just slack-watch` probe the actual webhook on `127.0.0.1:3001`; they restart the port-forward when the local webhook returns `000` or connection refused. The tunnel is pointed at `http://127.0.0.1:3001` to avoid `localhost` resolving to the wrong loopback address.
+
+For unsigned health probes, `HTTP 401` is healthy. It means the request reached slackbot and was rejected only because it was not signed by Slack.
+
+To stop and restart the whole local stack cleanly:
+
+```bash
+just restart-clean
+```
+
+This runs `slack-down`, deletes the local Kubernetes namespace, rebuilds and redeploys the stack, starts the Slack watcher, then prints `status` and `slack-status`.
+
+To only stop everything cleanly:
+
+```bash
+just down-clean
+```
+
+This stops the Slack watcher/tunnel/port-forward first, then deletes the local Kubernetes namespace. Prefer it over `just down` when Slack local development is running.
+
+For a stable non-local deployment, do not depend on a laptop `3001` bridge. Put the Slack HTTPS ingress or tunnel inside the Kubernetes deployment so it has normal readiness, liveness, restart, and observability behavior.
+
 ## Tools
 
 Tools are small Python plugins. A tool can wrap an internal service, public API, database, search endpoint, deployment system, or anything else an agent should be allowed to use.

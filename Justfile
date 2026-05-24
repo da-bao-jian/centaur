@@ -6,8 +6,13 @@ chart := "contrib/chart"
 dev_values := "contrib/chart/values.dev.yaml"
 slack_values := "contrib/chart/values.slack.yaml"
 slack_pf_pid := "/tmp/centaur-slack-pf.pid"
+slack_pf_log := "/tmp/centaur-slack-pf.log"
+slack_pf_session := "centaur-slack-pf"
 slack_tunnel_pid := "/tmp/centaur-slack-tunnel.pid"
 slack_tunnel_log := "/tmp/centaur-slack-tunnel.log"
+slack_watch_pid := "/tmp/centaur-slack-watch.pid"
+slack_watch_log := "/tmp/centaur-slack-watch.log"
+slack_watch_session := "centaur-slack-watch"
 slack_local_port := "3001"
 overlay_values := "contrib/chart/values.overlay.yaml"
 overlay_dir := "../centaur-overlay"
@@ -97,6 +102,17 @@ up:
 down:
     kubectl delete namespace {{namespace}} --ignore-not-found --wait
 
+down-clean:
+    just slack-down
+    just down
+
+restart-clean:
+    just down-clean
+    just up
+    just slack-watch
+    just status
+    just slack-status
+
 reinstall:
     just down
     just up
@@ -133,7 +149,8 @@ overlay-up:
 
 # Bring the local Slack integration online: ensure the slackbot Deployment
 # is helm-enabled and scaled to 1, then expose the webhook endpoint via a
-# port-forward + public tunnel. Idempotent — re-running heals dead processes.
+# port-forward + public tunnel. Idempotent — re-running heals dead processes
+# and stale pid files by probing the actual local/private leg on port 3001.
 #
 # Tunnel: prefers ngrok with a stable static domain when NGROK_DOMAIN is set
 # (export NGROK_DOMAIN=<your>.ngrok-free.dev), falls back to cloudflared's
@@ -145,6 +162,18 @@ slack-up:
 
     deploy="{{release}}-centaur-slackbot"
     svc="{{release}}-centaur-slackbot"
+
+    webhook_code() {
+      curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "$1" \
+        -H 'Content-Type: application/json' -d '{}' || true
+    }
+
+    webhook_healthy() {
+      case "$1" in
+        200|400|401|403) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
 
     if ! kubectl -n {{namespace}} get deploy "$deploy" >/dev/null 2>&1; then
       echo "==> slackbot Deployment missing; helm upgrade with slack overlay"
@@ -160,44 +189,77 @@ slack-up:
     fi
     kubectl -n {{namespace}} rollout status deploy/"$deploy" --timeout=120s
 
+    pf_code="000"
     if [[ -f {{slack_pf_pid}} ]] && kill -0 "$(cat {{slack_pf_pid}})" 2>/dev/null; then
-      echo "==> port-forward already running (pid $(cat {{slack_pf_pid}}))"
-    else
-      rm -f {{slack_pf_pid}}
-      echo "==> starting port-forward svc/$svc {{slack_local_port}}:{{slack_local_port}}"
-      kubectl -n {{namespace}} port-forward svc/"$svc" {{slack_local_port}}:{{slack_local_port}} >/dev/null 2>&1 &
-      echo $! > {{slack_pf_pid}}
-      sleep 2
+      pf_code="$(webhook_code "http://127.0.0.1:{{slack_local_port}}/api/webhooks/slack")"
     fi
-
-    if [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null; then
-      echo "==> tunnel already running (pid $(cat {{slack_tunnel_pid}}))"
+    if [[ -f {{slack_pf_pid}} ]] && kill -0 "$(cat {{slack_pf_pid}})" 2>/dev/null && webhook_healthy "$pf_code"; then
+      echo "==> port-forward already healthy (pid $(cat {{slack_pf_pid}}), HTTP $pf_code)"
     else
-      rm -f {{slack_tunnel_pid}} {{slack_tunnel_log}}
-      if [[ -n "${NGROK_DOMAIN:-}" ]]; then
-        command -v ngrok >/dev/null || { echo "ngrok not installed; brew install ngrok or unset NGROK_DOMAIN" >&2; exit 2; }
-        echo "==> starting ngrok tunnel on ${NGROK_DOMAIN}"
-        ngrok http --domain "${NGROK_DOMAIN}" {{slack_local_port}} --log stdout --log-format logfmt >{{slack_tunnel_log}} 2>&1 &
-        echo $! > {{slack_tunnel_pid}}
-      else
-        command -v cloudflared >/dev/null || { echo "cloudflared not installed; brew install cloudflared or set NGROK_DOMAIN" >&2; exit 2; }
-        echo "==> starting cloudflared quick tunnel (URL changes on every restart)"
-        cloudflared tunnel --url http://localhost:{{slack_local_port}} --no-autoupdate >{{slack_tunnel_log}} 2>&1 &
-        echo $! > {{slack_tunnel_pid}}
+      if [[ -f {{slack_pf_pid}} ]]; then
+        echo "==> port-forward unhealthy (HTTP $pf_code); restarting"
       fi
-      sleep 4
+      rm -f {{slack_pf_pid}} {{slack_pf_log}}
+      echo "==> starting port-forward svc/$svc {{slack_local_port}}:{{slack_local_port}}"
+      command -v tmux >/dev/null || { echo "tmux not installed; brew install tmux" >&2; exit 2; }
+      tmux kill-session -t {{slack_pf_session}} 2>/dev/null || true
+      tmux new-session -d -s {{slack_pf_session}} "
+        while true; do
+          date '+%Y-%m-%d %H:%M:%S starting kubectl port-forward' >>{{slack_pf_log}}
+          tail -f /dev/null | kubectl -n {{namespace}} port-forward svc/$svc {{slack_local_port}}:{{slack_local_port}} >>{{slack_pf_log}} 2>&1
+          date '+%Y-%m-%d %H:%M:%S kubectl port-forward exited; restarting' >>{{slack_pf_log}}
+          sleep 1
+        done
+      "
+      tmux display-message -p -t {{slack_pf_session}} '#{pane_pid}' > {{slack_pf_pid}}
+      sleep 2
     fi
 
     url=""
     if [[ -n "${NGROK_DOMAIN:-}" ]]; then
       url="https://${NGROK_DOMAIN}"
-    else
+    elif [[ -f {{slack_tunnel_log}} ]]; then
       for _ in $(seq 1 15); do
         url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' {{slack_tunnel_log}} | head -n1 || true)"
         [[ -n "$url" ]] && break
         sleep 1
       done
     fi
+
+    tunnel_code="000"
+    if [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null; then
+      tunnel_code="$(webhook_code "${url}/api/webhooks/slack")"
+    fi
+    if [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null && webhook_healthy "$tunnel_code"; then
+      echo "==> tunnel already healthy (pid $(cat {{slack_tunnel_pid}}), HTTP $tunnel_code)"
+    else
+      if [[ -f {{slack_tunnel_pid}} ]]; then
+        echo "==> tunnel unhealthy (HTTP $tunnel_code); restarting"
+        pid="$(cat {{slack_tunnel_pid}})"
+        kill "$pid" 2>/dev/null || true
+      fi
+      rm -f {{slack_tunnel_pid}} {{slack_tunnel_log}}
+      if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+        command -v ngrok >/dev/null || { echo "ngrok not installed; brew install ngrok or unset NGROK_DOMAIN" >&2; exit 2; }
+        echo "==> starting ngrok tunnel on ${NGROK_DOMAIN}"
+        ngrok http --domain "${NGROK_DOMAIN}" http://127.0.0.1:{{slack_local_port}} --log stdout --log-format logfmt >{{slack_tunnel_log}} 2>&1 &
+        echo $! > {{slack_tunnel_pid}}
+        url="https://${NGROK_DOMAIN}"
+      else
+        command -v cloudflared >/dev/null || { echo "cloudflared not installed; brew install cloudflared or set NGROK_DOMAIN" >&2; exit 2; }
+        echo "==> starting cloudflared quick tunnel (URL changes on every restart)"
+        cloudflared tunnel --url http://127.0.0.1:{{slack_local_port}} --no-autoupdate >{{slack_tunnel_log}} 2>&1 &
+        echo $! > {{slack_tunnel_pid}}
+        url=""
+        for _ in $(seq 1 15); do
+          url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' {{slack_tunnel_log}} | head -n1 || true)"
+          [[ -n "$url" ]] && break
+          sleep 1
+        done
+      fi
+      sleep 4
+    fi
+
     if [[ -z "$url" ]]; then
       echo "tunnel did not surface a URL; tail of {{slack_tunnel_log}}:" >&2
       tail -n 30 {{slack_tunnel_log}} >&2 || true
@@ -205,7 +267,7 @@ slack-up:
     fi
 
     echo "==> verifying local port-forward (curl on 127.0.0.1:{{slack_local_port}})"
-    pf_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:{{slack_local_port}}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
+    pf_code="$(webhook_code "http://127.0.0.1:{{slack_local_port}}/api/webhooks/slack")"
     case "$pf_code" in
       400|401|403) echo "    OK (HTTP $pf_code — slackbot rejected unsigned payload as expected)" ;;
       200) echo "    OK (HTTP 200)" ;;
@@ -213,7 +275,7 @@ slack-up:
     esac
 
     echo "==> verifying tunnel reachability (${url}/api/webhooks/slack)"
-    tunnel_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 -X POST "${url}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
+    tunnel_code="$(webhook_code "${url}/api/webhooks/slack")"
     case "$tunnel_code" in
       400|401|403|200) echo "    OK (HTTP $tunnel_code)" ;;
       000) echo "    DNS for ${url#https://} not yet resolvable locally — usually fine, Slack's edge resolves separately. Retry curl in ~30s if you need confirmation." ;;
@@ -230,6 +292,9 @@ slack-down:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    tmux kill-session -t {{slack_watch_session}} 2>/dev/null || true
+    rm -f {{slack_watch_pid}} {{slack_watch_log}}
+
     for pidfile in {{slack_tunnel_pid}} {{slack_pf_pid}}; do
       if [[ -f "$pidfile" ]]; then
         pid="$(cat "$pidfile")"
@@ -240,6 +305,8 @@ slack-down:
         rm -f "$pidfile"
       fi
     done
+    tmux kill-session -t {{slack_pf_session}} 2>/dev/null || true
+    rm -f {{slack_pf_log}} {{slack_tunnel_log}}
 
     deploy="{{release}}-centaur-slackbot"
     if kubectl -n {{namespace}} get deploy "$deploy" >/dev/null 2>&1; then
@@ -249,6 +316,30 @@ slack-down:
         kubectl -n {{namespace}} scale deploy/"$deploy" --replicas=0
       fi
     fi
+
+slack-watch interval="15":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    command -v tmux >/dev/null || { echo "tmux not installed; brew install tmux" >&2; exit 2; }
+    if [[ -f {{slack_watch_pid}} ]] && kill -0 "$(cat {{slack_watch_pid}})" 2>/dev/null; then
+      echo "slack watcher already running (pid $(cat {{slack_watch_pid}}))"
+      exit 0
+    fi
+
+    tmux kill-session -t {{slack_watch_session}} 2>/dev/null || true
+    rm -f {{slack_watch_log}}
+    repo="$(pwd)"
+    tmux new-session -d -s {{slack_watch_session}} "
+      cd \"$repo\"
+      while true; do
+        date '+%Y-%m-%d %H:%M:%S slack-watch tick' >>{{slack_watch_log}}
+        just slack-up >>{{slack_watch_log}} 2>&1 || true
+        sleep {{interval}}
+      done
+    "
+    tmux display-message -p -t {{slack_watch_session}} '#{pane_pid}' > {{slack_watch_pid}}
+    echo "slack watcher started (pid $(cat {{slack_watch_pid}}), interval {{interval}}s)"
 
 slack-status:
     #!/usr/bin/env bash
@@ -261,12 +352,20 @@ slack-status:
       echo "slackbot Deployment not installed"
     fi
 
-    for label in port-forward:{{slack_pf_pid}} tunnel:{{slack_tunnel_pid}}; do
+    local_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:{{slack_local_port}}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
+    echo "local webhook: HTTP ${local_code}"
+
+    for label in port-forward:{{slack_pf_pid}} tunnel:{{slack_tunnel_pid}} watcher:{{slack_watch_pid}}; do
       name="${label%%:*}"; pidfile="${label##*:}"
       if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         echo "${name}: alive (pid $(cat "$pidfile"))"
       else
         echo "${name}: down"
+        if [[ "$name" == "port-forward" && -f {{slack_pf_log}} ]]; then
+          tail -n 5 {{slack_pf_log}} || true
+        elif [[ "$name" == "watcher" && -f {{slack_watch_log}} ]]; then
+          tail -n 5 {{slack_watch_log}} || true
+        fi
       fi
     done
 

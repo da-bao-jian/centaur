@@ -138,6 +138,48 @@ def test_request_attaches_traceparent(monkeypatch) -> None:
     ]
 
 
+def test_start_thread_ignores_legacy_amp_resume_var(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    requests: list[tuple[str, dict]] = []
+
+    def fake_request(method: str, params: dict, timeout: float = 30.0) -> dict:
+        requests.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": "fresh-thread"}}
+        return {}
+
+    monkeypatch.delenv("CODEX_CONTINUE_THREAD_ID", raising=False)
+    monkeypatch.setenv("AMP_CONTINUE_THREAD_ID", "legacy-amp-thread")
+    monkeypatch.setattr(wrapper, "request", fake_request)
+    monkeypatch.setattr(wrapper.os, "getcwd", lambda: "/workspace")
+    wrapper.THREAD_ID = None
+
+    assert wrapper.start_or_resume_thread() == "fresh-thread"
+    assert requests == [("thread/start", {"cwd": "/workspace"})]
+
+
+def test_start_thread_uses_codex_resume_var(monkeypatch) -> None:
+    wrapper = _load_wrapper()
+    requests: list[tuple[str, dict]] = []
+
+    def fake_request(method: str, params: dict, timeout: float = 30.0) -> dict:
+        requests.append((method, params))
+        if method == "thread/resume":
+            return {"thread": {"id": "codex-thread"}}
+        return {}
+
+    monkeypatch.setenv("CODEX_CONTINUE_THREAD_ID", "codex-thread")
+    monkeypatch.setenv("AMP_CONTINUE_THREAD_ID", "legacy-amp-thread")
+    monkeypatch.setattr(wrapper, "request", fake_request)
+    monkeypatch.setattr(wrapper.os, "getcwd", lambda: "/workspace")
+    wrapper.THREAD_ID = None
+
+    assert wrapper.start_or_resume_thread() == "codex-thread"
+    assert requests == [
+        ("thread/resume", {"threadId": "codex-thread", "cwd": "/workspace"})
+    ]
+
+
 def test_main_lazy_starts_app_server_after_input(monkeypatch) -> None:
     wrapper = _load_wrapper()
     requests: list[tuple[str, dict]] = []

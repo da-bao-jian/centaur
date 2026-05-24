@@ -655,6 +655,11 @@ def _resolve_harness_profile(
     return engine, None, None
 
 
+def _supports_cold_thread_resume(engine: str) -> bool:
+    """Return whether a harness thread id can survive a fresh sandbox pod."""
+    return engine in {"amp", "claude-code"}
+
+
 # ── Async public API ─────────────────────────────────────────────────────────
 
 
@@ -668,7 +673,8 @@ async def get_or_spawn(
     """Get existing session or spawn a new sandbox.
 
     Tries (in order): DB session → warm pool → cold spawn.
-    For suspended/dead sessions, preserves agent_thread_id for resume.
+    For suspended/dead sessions, preserves agent_thread_id only for harnesses
+    that can resume across a fresh sandbox pod.
     """
     old_agent_thread_id: str = ""
     old_last_delivered_id: str = ""
@@ -714,11 +720,14 @@ async def get_or_spawn(
     resolved_engine, resolved_persona, repo = _resolve_harness_profile(
         harness, persona=persona, engine_override=engine
     )
+    preserved_agent_thread_id = (
+        old_agent_thread_id if _supports_cold_thread_resume(resolved_engine) else ""
+    )
 
     # Try warm pool first
     should_try_warm = (
         not engine
-        and not old_agent_thread_id
+        and not preserved_agent_thread_id
         and not old_inflight_turn_id
         and not (harness == "amp" and resolved_engine == "codex")
     )
@@ -730,13 +739,13 @@ async def get_or_spawn(
             thread_key, harness, persona=resolved_persona, repo=repo, trace_id=trace_id
         )
         if claimed:
-            if old_agent_thread_id:
-                claimed.agent_thread_id = old_agent_thread_id
+            if preserved_agent_thread_id:
+                claimed.agent_thread_id = preserved_agent_thread_id
             won = await _db_insert_session(
                 claimed,
                 harness=claimed.harness,
                 engine=claimed.engine,
-                agent_thread_id=old_agent_thread_id,
+                agent_thread_id=preserved_agent_thread_id,
                 last_delivered_id=old_last_delivered_id,
                 inflight_turn_id=old_inflight_turn_id,
                 inflight_turn_input=old_inflight_turn_input,
@@ -751,6 +760,9 @@ async def get_or_spawn(
     resolved_engine, resolved_persona, repo = _resolve_harness_profile(
         harness, persona=persona, engine_override=engine
     )
+    preserved_agent_thread_id = (
+        old_agent_thread_id if _supports_cold_thread_resume(resolved_engine) else ""
+    )
     backend = get_backend()
     await _evict_idle_sessions_for_capacity(backend)
     trace_id = old_trace_id or thread_trace_id or str(uuid.uuid4())
@@ -760,12 +772,12 @@ async def get_or_spawn(
         resolved_engine,
         persona=resolved_persona,
         repo=repo,
-        resume_thread_id=old_agent_thread_id or None,
+        resume_thread_id=preserved_agent_thread_id or None,
         trace_id=trace_id,
     )
     session.trace_id = trace_id
-    if old_agent_thread_id:
-        session.agent_thread_id = old_agent_thread_id
+    if preserved_agent_thread_id:
+        session.agent_thread_id = preserved_agent_thread_id
     _get_runtime(session.sandbox_id)
     log.info(
         "pipe_session_spawned", thread_key=thread_key, sandbox=session.sandbox_id[:12]
@@ -776,7 +788,7 @@ async def get_or_spawn(
         session,
         harness=session.harness,
         engine=session.engine,
-        agent_thread_id=old_agent_thread_id,
+        agent_thread_id=preserved_agent_thread_id,
         last_delivered_id=old_last_delivered_id,
         inflight_turn_id=old_inflight_turn_id,
         inflight_turn_input=old_inflight_turn_input,

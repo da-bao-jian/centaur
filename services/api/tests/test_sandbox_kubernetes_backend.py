@@ -207,6 +207,46 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
 
 
+def test_container_env_uses_engine_specific_resume_vars() -> None:
+    amp_env = dict(
+        item.split("=", 1)
+        for item in sandbox_container_env(
+            "thread-key",
+            "sandbox-id",
+            "firewall.internal",
+            engine="amp",
+            resume_thread_id="amp-thread",
+        )
+    )
+    codex_env = dict(
+        item.split("=", 1)
+        for item in sandbox_container_env(
+            "thread-key",
+            "sandbox-id",
+            "firewall.internal",
+            engine="codex",
+            resume_thread_id="codex-thread",
+        )
+    )
+    claude_env = dict(
+        item.split("=", 1)
+        for item in sandbox_container_env(
+            "thread-key",
+            "sandbox-id",
+            "firewall.internal",
+            engine="claude-code",
+            resume_thread_id="claude-thread",
+        )
+    )
+
+    assert amp_env["AMP_CONTINUE_THREAD_ID"] == "amp-thread"
+    assert "CODEX_CONTINUE_THREAD_ID" not in amp_env
+    assert codex_env["CODEX_CONTINUE_THREAD_ID"] == "codex-thread"
+    assert "AMP_CONTINUE_THREAD_ID" not in codex_env
+    assert claude_env["CLAUDE_CONTINUE_SESSION_ID"] == "claude-thread"
+    assert "AMP_CONTINUE_THREAD_ID" not in claude_env
+
+
 def test_container_env_passes_laminar_otel_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

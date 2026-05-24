@@ -108,6 +108,7 @@ def container_env(
     container_name: str,
     firewall_host: str,
     *,
+    engine: str | None = None,
     trace_id: str | None = None,
     resume_thread_id: str | None = None,
     pg_dsns: dict[str, str] | None = None,
@@ -133,7 +134,13 @@ def container_env(
     if visibility:
         env.append(f"AMP_THREAD_VISIBILITY={visibility}")
     if resume_thread_id:
-        env.append(f"AMP_CONTINUE_THREAD_ID={resume_thread_id}")
+        normalized_engine = (engine or "amp").strip()
+        if normalized_engine == "codex":
+            env.append(f"CODEX_CONTINUE_THREAD_ID={resume_thread_id}")
+        elif normalized_engine == "claude-code":
+            env.append(f"CLAUDE_CONTINUE_SESSION_ID={resume_thread_id}")
+        else:
+            env.append(f"AMP_CONTINUE_THREAD_ID={resume_thread_id}")
 
     no_proxy_hosts = ["localhost", "127.0.0.1", firewall_host]
     api_host = urlsplit(api_url).hostname
