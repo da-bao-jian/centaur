@@ -240,7 +240,6 @@ export class CodexSessionRenderer {
     const state = getState(agentSessionId)
     if (state.done) return
     if (threadId) state.threadId = threadId
-    state.done = true
     completeThinkingTasks(state)
     completeOpenTasks(state)
     await this.publishActivitySummary(agentSessionId, state, { final: true })
