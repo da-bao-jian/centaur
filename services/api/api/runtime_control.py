@@ -1869,10 +1869,14 @@ async def _mark_execution_terminal(
                     0,
                 )
             result_has_text = bool(result_text.strip())
+            result_text_chars = len(result_text)
             suppress_legacy_delivery = (
                 _has_slackbot_live_delivery(metadata)
                 and not slackbot_live_delivery_failed
-                and (not result_has_text or slackbot_streamed_answer_chars > 0)
+                and (
+                    not result_has_text
+                    or slackbot_streamed_answer_chars >= result_text_chars
+                )
             )
         assignment_row = await pool.fetchrow(
             "SELECT harness, engine, persona_id, prompt_ref, effective_agents_md_sha256 "
