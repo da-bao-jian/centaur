@@ -194,23 +194,18 @@ For a stable non-local deployment, do not depend on a laptop `3001` bridge. Put 
 
 ## Branch Workflow
 
-Keep the deployed branch stable. For this checkout, `feat/codex-chatgpt-auth` is the current stable branch unless the operator explicitly chooses another branch.
+This checkout uses a fork-based release flow:
 
-Use this flow for fixes:
-
-```bash
-git switch feat/codex-chatgpt-auth
-git pull --ff-only origin feat/codex-chatgpt-auth
-git switch -c fix/<short-description>
-# edit, test, commit, push
-
-git switch staging/feat-codex-chatgpt-auth
-git pull --ff-only origin staging/feat-codex-chatgpt-auth
-git merge --no-ff fix/<short-description>
-git push origin staging/feat-codex-chatgpt-auth
+```text
+upstream/main -> origin/main -> origin/staging -> origin/prod
 ```
 
-Do not merge `staging/feat-codex-chatgpt-auth` back into `feat/codex-chatgpt-auth` unless the operator explicitly asks for that promotion. Local emergency testing can build and deploy a fix branch, but the checkout and normal local stack should be restored to the stable branch afterward.
+`origin` is the controlled fork. `upstream` is the original project and is used
+only for deliberate sync branches. `staging` is the staging deployment branch,
+and `prod` is the live Pris bot deployment branch.
+
+See [docs/RELEASE_FLOW.md](docs/RELEASE_FLOW.md) for the required commands and
+promotion rules.
 
 ## Tools
 

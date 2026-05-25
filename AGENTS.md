@@ -255,6 +255,70 @@ centaur/
 
 - **Chat SDK** always refers to the [Vercel Chat SDK](https://github.com/vercel/chat) (`~/github/vercel/chat`). When you need to understand how the Chat SDK or `@chat-adapter/*` packages work, **always read the source at `~/github/vercel/chat`** — never dig through `node_modules`.
 
+## Release Branch Flow
+
+This checkout uses a fork-based release flow. `origin` is the controlled fork
+(`da-bao-jian/centaur`) and is the only remote that release branches are pushed
+to. `upstream` is the original project (`paradigmxyz/centaur`) and must be
+treated as read-only unless the operator explicitly asks to push there.
+
+Long-lived branches:
+
+| Branch | Role |
+|--------|------|
+| `main` | Integration branch in the fork. Feature PRs and upstream sync PRs land here first. |
+| `staging` | Release-candidate branch. This is the only branch that should deploy to staging. |
+| `prod` | Production branch. This is the only branch that should deploy the live Pris bot. |
+
+Short-lived branch prefixes:
+
+- `feat/...` for feature work
+- `fix/...` for normal fixes
+- `hotfix/...` for urgent production fixes cut from `prod`
+- `sync/upstream-YYYY-MM-DD` for deliberate upstream syncs
+
+Do not create branches under `staging/...` or `prod/...`; those names block the
+plain `staging` and `prod` refs Git needs for release branches.
+
+Normal work flow:
+
+1. Branch from `main`: `git switch main && git pull --ff-only origin main`.
+2. Create `feat/...` or `fix/...`, commit there, and open a PR to `main`.
+3. Promote `main` to `staging` only after tests pass.
+4. Promote `staging` to `prod` only after staging validation.
+5. Tag production releases after `prod` moves.
+
+Promotion commands:
+
+```bash
+git fetch origin
+git switch staging
+git merge --ff-only origin/main
+git push origin staging
+
+git switch prod
+git merge --ff-only origin/staging
+git push origin prod
+git tag prod-YYYY-MM-DD-N
+git push origin prod-YYYY-MM-DD-N
+```
+
+Upstream syncs must be explicit:
+
+```bash
+git fetch upstream origin
+git switch main
+git pull --ff-only origin main
+git switch -c sync/upstream-YYYY-MM-DD
+git merge upstream/main
+# resolve conflicts, test, push, open PR to main
+```
+
+Hotfixes start from `prod`, then get merged back into `staging` and `main` so
+branches do not drift. Never deploy from feature, fix, or sync branches.
+
+See `docs/RELEASE_FLOW.md` for the operator-facing version of this flow.
+
 ## Testing Before Pushing
 
 **NEVER push changes without testing them locally first.** Testing means actually running the affected service and proving the change works end-to-end — not just linting or reasoning about it.
