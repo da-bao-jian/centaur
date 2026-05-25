@@ -14,15 +14,14 @@ postgres:
 
 slackbot:
   enabled: true
+  image:
+    pullPolicy: IfNotPresent
 
 api:
   executionWorkerEnabled: true
   pluginWatcherEnabled: true
   egressDiscovery:
     enabled: false
-
-laminar:
-  enabled: true
 
 ironProxy:
   manager:

@@ -53,8 +53,6 @@ _SANDBOX_OVERLAY_DIR = f"{_SANDBOX_OVERLAY_ROOT}/org"
 _PROXY_LABEL = "centaur.ai/iron-proxy"
 _API_PROXY_POD_NAME = "centaur-api-proxy"
 _API_PROXY_SANDBOX_ID = "api"
-
-
 def _get_rt(session: SandboxSession):
     return runtime_for_session(session)
 
@@ -98,6 +96,11 @@ def _runtime_class_name() -> str | None:
 def _service_account_name() -> str | None:
     value = (os.getenv("KUBERNETES_SANDBOX_SERVICE_ACCOUNT_NAME") or "").strip()
     return value or None
+
+
+def _state_volume_enabled() -> bool:
+    value = (os.getenv("KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -554,6 +557,26 @@ class KubernetesExecutorBackend(SandboxBackend):
             if pod_name:
                 await self._delete_pod(pod_name)
 
+    def _configure_workload_volumes(
+        self,
+        volume_mounts: list[dict[str, Any]],
+        volumes: list[dict[str, Any]],
+    ) -> None:
+        if _state_volume_enabled():
+            raise ValueError(
+                "KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED requires "
+                "KUBERNETES_SANDBOX_CONTROLLER=agent-sandbox"
+            )
+
+    async def _delete_existing_workload(self, pod_name: str) -> None:
+        await self._delete_pod(pod_name)
+
+    async def _create_workload(self, pod_spec: dict[str, Any]) -> None:
+        await self._core_api().create_namespaced_pod(_namespace(), pod_spec)
+
+    async def _cleanup_workload_after_create_error(self, pod_name: str) -> None:
+        await self._delete_pod(pod_name)
+
     def _collect_secrets(self) -> list[SecretDef]:
         from api.app import get_tool_manager
 
@@ -1000,7 +1023,19 @@ class KubernetesExecutorBackend(SandboxBackend):
     async def _wait_ready(self, pod_name: str) -> float:
         deadline = time.monotonic() + _READY_TIMEOUT_S
         while time.monotonic() < deadline:
-            pod = await self._core_api().read_namespaced_pod(pod_name, _namespace())
+            try:
+                pod = await self._core_api().read_namespaced_pod(pod_name, _namespace())
+            except Exception as exc:
+                if self._is_not_found(exc):
+                    await asyncio.sleep(0.5)
+                    continue
+                raise
+            if (
+                getattr(getattr(pod, "metadata", None), "deletion_timestamp", None)
+                is not None
+            ):
+                await asyncio.sleep(0.5)
+                continue
             phase = (pod.status.phase or "").lower()
             if phase in {"failed", "succeeded"}:
                 raise RuntimeError(f"sandbox pod exited before ready (phase={phase})")
@@ -1182,6 +1217,8 @@ class KubernetesExecutorBackend(SandboxBackend):
                 }
             )
 
+        self._configure_workload_volumes(volume_mounts, volumes)
+
         cmd = build_harness_cmd(engine, model)
 
         pod_spec: dict[str, Any] = {
@@ -1242,7 +1279,7 @@ class KubernetesExecutorBackend(SandboxBackend):
         if service_account_name:
             pod_spec["spec"]["serviceAccountName"] = service_account_name
 
-        await self._delete_pod(pod_name)
+        await self._delete_existing_workload(pod_name)
         await self._delete_proxy_resources(pod_name)
         try:
             await self._create_prompt_secret(secret_name, persona)
@@ -1253,7 +1290,7 @@ class KubernetesExecutorBackend(SandboxBackend):
                 pod_name, pg_secrets, pg_listen_ports
             )
             await self._wait_pod_ready(proxy_pod_name)
-            await self._core_api().create_namespaced_pod(_namespace(), pod_spec)
+            await self._create_workload(pod_spec)
             await self._wait_ready(pod_name)
         except BaseException:
             # Catch BaseException so asyncio.CancelledError (e.g. from
@@ -1261,7 +1298,7 @@ class KubernetesExecutorBackend(SandboxBackend):
             # otherwise the partially created pod, proxy pod, service,
             # network policies, and prompt secret leak.
             with contextlib.suppress(Exception):
-                await self._delete_pod(pod_name)
+                await self._cleanup_workload_after_create_error(pod_name)
             with contextlib.suppress(Exception):
                 await self._delete_proxy_resources(pod_name)
             with contextlib.suppress(Exception):

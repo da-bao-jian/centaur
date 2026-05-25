@@ -390,7 +390,7 @@ async def _evict_idle_sessions_for_capacity(backend) -> int:
                 max_active=MAX_ACTIVE_SANDBOX_SESSIONS,
             )
             with contextlib.suppress(Exception):
-                await backend.stop_by_id(sandbox_id)
+                await backend.pause_by_id(sandbox_id)
             await pool.execute(
                 "UPDATE sandbox_sessions SET state = 'suspended', updated_at = NOW() "
                 "WHERE thread_key = $1 AND state = 'idle'",
@@ -834,6 +834,7 @@ async def get_or_spawn(
     old_inflight_attempts: int = 0
     old_last_result: str = ""
     old_trace_id: str = ""
+    pool = _get_pool()
     session = await _db_get_session(thread_key)
     if session:
         if session.db_state in _REUSABLE_DB_STATES:
@@ -842,6 +843,34 @@ async def get_or_spawn(
             if st == "running":
                 _get_runtime(session.sandbox_id)
                 return session
+            if session.db_state == "suspended":
+                try:
+                    await backend.resume_by_id(session.sandbox_id)
+                    resumed_status = await backend.status(session)
+                    if resumed_status != "running":
+                        raise RuntimeError(
+                            f"suspended sandbox did not resume: {resumed_status}"
+                        )
+                    await pool.execute(
+                        "UPDATE sandbox_sessions SET state = 'idle', updated_at = NOW() "
+                        "WHERE thread_key = $1 AND sandbox_id = $2",
+                        thread_key,
+                        session.sandbox_id,
+                    )
+                    session.db_state = "idle"
+                    _get_runtime(session.sandbox_id)
+                    return session
+                except Exception as exc:
+                    log.warning(
+                        "suspended_session_resume_failed",
+                        thread_key=thread_key,
+                        sandbox=session.sandbox_id[:12],
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    raise RuntimeError(
+                        f"failed to resume suspended sandbox: {session.sandbox_id}"
+                    ) from exc
             # Container is gone — save agent_thread_id and cursor for resume, clean up row
             old_agent_thread_id = session.agent_thread_id
             old_last_delivered_id = session.last_delivered_id
@@ -850,6 +879,9 @@ async def get_or_spawn(
             old_inflight_attempts = session.inflight_attempts
             old_last_result = session.last_result
             old_trace_id = session.trace_id
+            if session.db_state == "suspended":
+                with contextlib.suppress(Exception):
+                    await backend.stop_by_id(session.sandbox_id)
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
         else:
@@ -864,7 +896,6 @@ async def get_or_spawn(
             await _db_delete_session(thread_key)
             _drop_runtime(session.sandbox_id)
 
-    pool = _get_pool()
     thread_trace_id = await get_or_create_thread_trace_id(pool, thread_key)
 
     effective_harness = harness or default_harness()
@@ -1868,14 +1899,8 @@ async def reconcile_tick() -> None:
                 log.info(
                     "idle_ttl_expired", thread_key=thread_key, sandbox=sandbox_id[:12]
                 )
-                session = SandboxSession(
-                    sandbox_id=sandbox_id,
-                    thread_key=thread_key,
-                    harness="",
-                    engine="",
-                )
                 with contextlib.suppress(Exception):
-                    await backend.stop(session)
+                    await backend.pause_by_id(sandbox_id)
                 await _mark_inactive(thread_key)
                 _drop_runtime(sandbox_id)
             except Exception:
@@ -1912,14 +1937,8 @@ async def reconcile_tick() -> None:
                     sandbox=sandbox_id[:12],
                     state=row["state"],
                 )
-                session = SandboxSession(
-                    sandbox_id=sandbox_id,
-                    thread_key=thread_key,
-                    harness="",
-                    engine="",
-                )
                 with contextlib.suppress(Exception):
-                    await backend.stop(session)
+                    await backend.pause_by_id(sandbox_id)
                 await _mark_inactive(thread_key)
                 _drop_runtime(sandbox_id)
             except Exception:
@@ -1958,14 +1977,8 @@ async def reconcile_tick() -> None:
                     state=row["state"],
                     inflight_turn_id=row["inflight_turn_id"],
                 )
-                session = SandboxSession(
-                    sandbox_id=sandbox_id,
-                    thread_key=thread_key,
-                    harness="",
-                    engine="",
-                )
                 with contextlib.suppress(Exception):
-                    await backend.stop(session)
+                    await backend.pause_by_id(sandbox_id)
                 await _mark_inactive(thread_key)
                 _drop_runtime(sandbox_id)
             except Exception:
@@ -1982,6 +1995,17 @@ async def reconcile_tick() -> None:
             "WHERE state IN ('gone', 'stopped') "
             "AND updated_at < NOW() - INTERVAL '1 hour'"
         )
+        expired_suspended_rows = await pool.fetch(
+            "SELECT thread_key, sandbox_id FROM sandbox_sessions "
+            "WHERE state = 'suspended' "
+            "AND updated_at < NOW() - make_interval(secs => $1::double precision)",
+            float(SUSPENDED_RETENTION_S),
+        )
+        for row in expired_suspended_rows:
+            sandbox_id = row["sandbox_id"]
+            with contextlib.suppress(Exception):
+                await backend.stop_by_id(sandbox_id)
+            _drop_runtime(sandbox_id)
         await pool.execute(
             "DELETE FROM sandbox_sessions "
             "WHERE state = 'suspended' "
