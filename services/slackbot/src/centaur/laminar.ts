@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { Laminar, type LaminarSpanContext } from '@lmnr-ai/lmnr'
+import type { LaminarSpanContext } from '@lmnr-ai/lmnr'
 
 let initialized = false
 let unavailable = false
+
+type LaminarClient = typeof import('@lmnr-ai/lmnr')['Laminar']
+let laminarClient: LaminarClient | null = null
 
 export type CentaurTrace = {
   trace_id?: unknown
@@ -15,7 +18,8 @@ export async function withLaminarSpan<T>(
   trace: CentaurTrace | undefined,
   fn: () => Promise<T>
 ): Promise<T> {
-  if (!initializeLaminar()) return fn()
+  const Laminar = await initializeLaminar()
+  if (!Laminar) return fn()
   const traceId = normalizeUuid(trace?.trace_id)
   const threadKey = String(trace?.thread_key ?? '').trim()
   const span = Laminar.startActiveSpan({
@@ -47,12 +51,13 @@ export async function withLaminarSpan<T>(
   }
 }
 
-function initializeLaminar(): boolean {
-  if (initialized) return true
-  if (unavailable) return false
+async function initializeLaminar(): Promise<LaminarClient | null> {
+  if (initialized && laminarClient) return laminarClient
+  if (unavailable) return null
   const projectApiKey = process.env.LMNR_PROJECT_API_KEY?.trim()
-  if (!projectApiKey) return false
+  if (!projectApiKey) return null
   try {
+    const { Laminar } = await import('@lmnr-ai/lmnr')
     Laminar.initialize({
       projectApiKey,
       baseUrl: process.env.LMNR_BASE_URL?.trim() || undefined,
@@ -65,12 +70,13 @@ function initializeLaminar(): boolean {
       },
       instrumentModules: {}
     })
+    laminarClient = Laminar
     initialized = true
-    return true
+    return Laminar
   } catch (error) {
     unavailable = true
     console.error('laminar_initialize_failed', error)
-    return false
+    return null
   }
 }
 
