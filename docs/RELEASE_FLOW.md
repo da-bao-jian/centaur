@@ -148,6 +148,18 @@ Keep `latest` as a convenience tag only, not as the source of truth.
 
 ## Staging E2E Checks
 
+Before promoting visibility or telemetry changes beyond `staging`, verify the
+Ops Console against the local stack:
+
+```bash
+kubectl -n centaur port-forward deploy/centaur-centaur-api 8000:8000
+curl -s -H "Authorization: Bearer $API_KEY" \
+  "http://localhost:8000/ops/api/summary?window_hours=24" | jq '.status, .monitors'
+```
+
+Then open `http://localhost:8000/ops` in a browser and confirm the monitor
+board renders without JavaScript errors.
+
 Before promoting dev-pulse workflow changes beyond `staging`, run the real
 Slack delivery E2E against the local stack:
 

@@ -611,9 +611,34 @@ This design keeps the local Helm stack minimal while preserving structured logs 
 
 | Component | Role | Config |
 |-----------|------|--------|
+| **Ops Console** | Built-in browser UI for DB-backed error detection, stuck-work monitoring, Dev Pulse health, and recent operational activity | Served by API at `/ops`; data endpoints require an admin API key |
 | **VictoriaLogs** | Optional log storage + query engine | External/overlay deployment |
 | **VictoriaMetrics** | Optional metrics storage + query engine | Push-based when enabled |
 | **Grafana** | Optional dashboards + log explorer | External/overlay deployment |
+
+### Ops Console
+
+Use the built-in Ops Console first when checking whether Centaur is healthy:
+
+```bash
+kubectl -n centaur port-forward deploy/centaur-centaur-api 8000:8000
+```
+
+Open `http://localhost:8000/ops` and enter an admin API key. The static page is
+public, but all `/ops/api/*` data endpoints require operator auth. The console
+is error-first: it surfaces recent workflow failures, failed executions, stuck
+queues/runs, overdue workflow schedules, Slack final-delivery failures,
+sandbox error states, Dev Pulse health, and tool registry load failures.
+
+The JSON endpoint for automation or smoke tests is:
+
+```bash
+curl -s -H "Authorization: Bearer $API_KEY" \
+  "http://localhost:8000/ops/api/summary?window_hours=24" | jq
+```
+
+Keep this dashboard DB-backed and useful even when Laminar, Grafana,
+VictoriaLogs, or VictoriaMetrics are unavailable.
 
 ### Querying logs
 

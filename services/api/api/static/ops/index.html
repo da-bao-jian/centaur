@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Centaur Ops Console</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/ops/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Centaur</p>
+        <h1>Ops Console</h1>
+      </div>
+      <div class="toolbar">
+        <label class="field">
+          <span>API key</span>
+          <input id="api-key" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field compact">
+          <span>Window</span>
+          <select id="window-hours">
+            <option value="6">6h</option>
+            <option value="24" selected>24h</option>
+            <option value="72">72h</option>
+            <option value="168">7d</option>
+          </select>
+        </label>
+        <button id="save-key" type="button">Connect</button>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main data-summary-endpoint="/ops/api/summary">
+      <section class="status-strip" aria-label="Current status">
+        <div class="status-pill" id="overall-status">Disconnected</div>
+        <div class="stat">
+          <span class="stat-label">Generated</span>
+          <strong id="generated-at">-</strong>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Errors</span>
+          <strong id="error-count">-</strong>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Stuck Work</span>
+          <strong id="stuck-count">-</strong>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Active Monitors</h2>
+          <p id="monitor-summary">Waiting for data.</p>
+        </div>
+        <div id="monitors" class="monitor-grid"></div>
+      </section>
+
+      <section class="split">
+        <div class="panel">
+          <div class="section-heading">
+            <h2>Error Inbox</h2>
+            <p>Recent failures across workflows, executions, Slack delivery, and sandboxes.</p>
+          </div>
+          <div id="errors" class="feed"></div>
+        </div>
+        <div class="panel">
+          <div class="section-heading">
+            <h2>Stuck Work</h2>
+            <p>Silent failure modes that need operator attention.</p>
+          </div>
+          <div id="stuck-work" class="feed"></div>
+        </div>
+      </section>
+
+      <section class="split">
+        <div class="panel">
+          <div class="section-heading">
+            <h2>Dev Pulse</h2>
+            <p>Schedule, last run, counts, and delivery health.</p>
+          </div>
+          <div id="dev-pulse" class="details"></div>
+        </div>
+        <div class="panel">
+          <div class="section-heading">
+            <h2>Operational Metrics</h2>
+            <p>Execution, workflow, runtime, and observation counters.</p>
+          </div>
+          <div id="metrics" class="metrics-grid"></div>
+        </div>
+      </section>
+
+      <section class="band">
+        <div class="section-heading">
+          <h2>Recent Activity</h2>
+          <p>Latest workflow runs and agent executions.</p>
+        </div>
+        <div class="split">
+          <div id="recent-workflows" class="table-wrap"></div>
+          <div id="recent-executions" class="table-wrap"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/ops/app.js"></script>
+  </body>
+</html>
