@@ -73,6 +73,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+              {{- with .Values.postgres.persistence.subPath }}
+              subPath: {{ . | quote }}
+              {{- end }}
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler
@@ -204,6 +207,8 @@ spec:
               value: {{ printf "localhost,127.0.0.1,%s,%s,%s,%s%s,centaur-egress.svc.cluster.local,.centaur-egress.svc.cluster.local" (include "centaur.componentName" (dict "root" . "component" "postgres")) (include "centaur.componentName" (dict "root" . "component" "api")) (include "centaur.componentName" (dict "root" . "component" "slackbot")) (include "centaur.firewallNoProxyHosts" .) (include "centaur.laminarNoProxyHosts" .) | quote }}
             - name: CENTAUR_LOG_LEVEL
               value: info
+            - name: CENTAUR_DEFAULT_HARNESS
+              value: {{ .Values.api.defaultHarness | quote }}
             - name: TOOL_DIRS
 {{- if .Values.overlay.image.repository }}
               value: {{ printf "/app/tools:%s/tools" .Values.overlay.mountPath | quote }}
@@ -246,6 +251,8 @@ spec:
               value: {{ ternary "1" "0" .Values.api.workflowWorkerEnabled | quote }}
             - name: WARM_POOL_ENABLED
               value: {{ ternary "1" "0" .Values.api.warmPoolEnabled | quote }}
+            - name: PLUGIN_WATCHER_ENABLED
+              value: {{ ternary "1" "0" .Values.api.pluginWatcherEnabled | quote }}
 {{- if not (hasKey $apiExtraEnv "SLACK_ETL_ENABLED") }}
             - name: SLACK_ETL_ENABLED
               value: {{ ternary "1" "0" .Values.api.slackEtlEnabled | quote }}

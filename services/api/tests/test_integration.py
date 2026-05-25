@@ -443,7 +443,7 @@ class TestResolveHarnessProfile:
             1. engine_override
             2. harness (when DIFFERENT from persona's declared engine)
             3. persona.engine
-            4. system default ("codex")
+            4. deployment default (CENTAUR_DEFAULT_HARNESS, falling back to "codex")
 
         Regression-locked: the previous resolver hardcoded engine="codex"
         for harness=="amp" regardless of persona, silently dropping the
@@ -487,7 +487,10 @@ class TestResolveHarnessProfile:
         # Rule 4: no override, no persona → harness if given, else system default.
         assert resolve("amp", persona=None)[0] == "amp"
         assert resolve("claude-code", persona=None)[0] == "claude-code"
+        monkeypatch.delenv("CENTAUR_DEFAULT_HARNESS", raising=False)
         assert resolve(None, persona=None)[0] == "codex"
+        monkeypatch.setenv("CENTAUR_DEFAULT_HARNESS", "claude")
+        assert resolve(None, persona=None)[0] == "claude-code"
 
     def test_unknown_harness_or_persona_is_rejected(self, monkeypatch):
         import sys
@@ -579,6 +582,10 @@ class TestBuildSessionContext:
         assert "Requester Identity" in ctx
         assert "GitHub handle from Slack profile: @alice" in ctx
         assert "GitHub handle verified: yes" in ctx
+        assert "GitHub PR Attribution" in ctx
+        assert "Prompted by: @alice" in ctx
+        assert "Assign the PR to the requester when possible: `alice`" in ctx
+        assert "not a Slack response mention rule" in ctx
 
     def test_requester_identity_without_github_handle(self):
         from api.agent import _build_session_context
@@ -600,6 +607,9 @@ class TestBuildSessionContext:
         assert "GitHub handle from Slack profile: unavailable" in ctx
         assert "no GitHub custom field found on Slack profile" in ctx
         assert "GitHub handle verified: no" in ctx
+        assert "GitHub PR Attribution" in ctx
+        assert "do not infer a GitHub username" in ctx
+        assert "Omit the `Prompted by` line" in ctx
 
     def test_extract_github_handle_from_slack_profile(self):
         from api.agent import _extract_github_handle_from_slack_profile

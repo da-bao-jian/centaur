@@ -24,6 +24,7 @@ from api.agent import (
     stop_session,
 )
 from api import slackbot_client
+from api.harness_config import default_harness
 from api.observability import (
     ExecutionObservationAccumulator,
     extract_usage_metrics,
@@ -72,6 +73,10 @@ EXECUTION_STREAM_EOF_RETRY_DELAY_S = max(
 )
 EXECUTION_STALE_RECOVERY_INTERVAL_S = float(
     os.getenv("EXECUTION_STALE_RECOVERY_INTERVAL_S", "5.0")
+)
+_RECONCILE_STARTUP_LIMIT = max(
+    int(os.getenv("EXECUTION_RECONCILE_STARTUP_LIMIT", "500")),
+    1,
 )
 EXECUTION_WORKER_CONCURRENCY = max(
     int(os.getenv("EXECUTION_WORKER_CONCURRENCY", "128")),
@@ -188,7 +193,7 @@ def _agent_session_title(
 ) -> str:
     parts = ["Centaur"]
     persona = (persona_id or "").strip()
-    runtime = (engine or harness or "codex").strip()
+    runtime = (engine or harness or default_harness()).strip()
     if persona:
         parts.append(persona)
     if runtime and runtime != persona:
@@ -459,19 +464,19 @@ async def spawn_assignment(
     )
 
     if active_assignment:
-        effective_harness = active_assignment.get("harness") or "codex"
+        effective_harness = active_assignment.get("harness") or default_harness()
         effective_engine = active_assignment.get("engine")
         effective_persona_id = active_assignment.get("persona_id")
         effective_agents_md_override = active_assignment.get("agents_md_override")
     else:
         # Explicit harness wins; otherwise inherit from the persona's declared
-        # engine; otherwise default to codex.
+        # engine; otherwise use the deployment default.
         if harness:
             effective_harness = harness
         elif persona_info is not None:
             effective_harness = persona_info.engine
         else:
-            effective_harness = "codex"
+            effective_harness = default_harness()
         effective_engine = engine
         effective_persona_id = persona_id
         effective_agents_md_override = agents_md_override
@@ -1316,7 +1321,7 @@ async def enqueue_execution(
 
     _worker_wake.set()
 
-    resolved_harness = str(active["harness"] or harness or "codex")
+    resolved_harness = str(active["harness"] or harness or default_harness())
     log.info(
         "execute_queued",
         thread_key=thread_key,
@@ -2267,7 +2272,7 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                     "last_progress_at = NOW(), "
                     "silence_deadline_at = NOW() + make_interval(secs => $1::double precision), "
                     "hard_deadline_at = CASE "
-                    "  WHEN er.status = 'queued' THEN NOW() + make_interval(secs => $5::double precision) "
+                    "  WHEN er.claimed_at IS NULL THEN NOW() + make_interval(secs => $5::double precision) "
                     "  ELSE er.hard_deadline_at "
                     "END, "
                     "worker_id = $2, "
@@ -3117,6 +3122,9 @@ async def _recover_stale_running(pool) -> int:
         "WHERE status IN ('running', 'retry_wait', 'cancel_requested') "
         "AND (worker_lease_expires_at IS NULL OR worker_lease_expires_at <= NOW())",
     )
+    # claimed_at is intentionally preserved across requeue so the next claim
+    # treats this row as a reclaim (preserving hard_deadline_at) rather than a
+    # first claim (which would re-anchor the deadline and lose the watchdog).
     recovered = _updated_count(result)
     if recovered:
         log.warning(
@@ -3131,6 +3139,11 @@ async def recover_interrupted_executions_on_startup(pool) -> int:
     recovered = await _recover_stale_running(pool)
     if recovered:
         log.warning("startup_execution_requeued", recovered=recovered)
+    reconciled = await _reconcile_orphaned_executions(
+        pool, limit=_RECONCILE_STARTUP_LIMIT
+    )
+    if reconciled:
+        log.warning("startup_orphaned_executions_reconciled", reconciled=reconciled)
     return recovered
 
 
@@ -3144,7 +3157,50 @@ async def _recover_stale_running_if_due(pool) -> None:
         if now - _last_recover_stale_running_at < EXECUTION_STALE_RECOVERY_INTERVAL_S:
             return
         await _recover_stale_running(pool)
+        await _reconcile_orphaned_executions(pool)
         _last_recover_stale_running_at = now
+
+
+async def _reconcile_orphaned_executions(pool, *, limit: int = 0) -> int:
+    grace_seconds = float(EXECUTION_HARD_TIMEOUT_S) * 2.0
+    sql = (
+        "SELECT execution_id, thread_key FROM agent_execution_requests "
+        "WHERE status IN ('queued', 'running', 'retry_wait', 'cancel_requested') "
+        "AND COALESCE(hard_deadline_at, created_at + make_interval(secs => $1::double precision)) < NOW() "
+        "ORDER BY COALESCE(hard_deadline_at, created_at + make_interval(secs => $1::double precision)) ASC"
+    )
+    args: list = [grace_seconds]
+    if limit > 0:
+        sql += " LIMIT $2"
+        args.append(limit)
+    rows = await pool.fetch(sql, *args)
+    if not rows:
+        return 0
+    reconciled = 0
+    for row in rows:
+        execution_id = str(row["execution_id"])
+        thread_key = str(row["thread_key"])
+        try:
+            await _mark_execution_terminal(
+                pool,
+                execution_id=execution_id,
+                thread_key=thread_key,
+                status="failed_permanent",
+                terminal_reason="hard_deadline_reaped",
+                result_text="",
+                error_text="execution outlived hard deadline without finalizing",
+            )
+            reconciled += 1
+        except Exception:
+            log.warning(
+                "hard_deadline_reap_failed",
+                execution_id=execution_id,
+                thread_key=thread_key,
+                exc_info=True,
+            )
+    if reconciled:
+        log.warning("hard_deadline_reaped", reconciled=reconciled)
+    return reconciled
 
 
 async def _execution_worker_loop(pool) -> None:
