@@ -330,6 +330,17 @@ See `docs/RELEASE_FLOW.md` for the operator-facing version of this flow.
 
 For tool changes: tools hot-reload, so just verify via `curl -X POST http://localhost:8000/tools/<tool>/<method>` from inside the API deployment. For Dockerfile/infra changes: rebuild, redeploy, and verify the binary/service is present and functional. For firewall changes: test from inside a sandbox pod through the proxy.
 
+For the dev-pulse workflow, staging verification must include a real Slack
+delivery to the test channel:
+
+```bash
+just dev-pulse-e2e
+```
+
+The recipe posts to `#pris-test`, waits for the workflow run to complete, and
+verifies that the metrics collection and Slack delivery checkpoints were
+written. Do not use `#dev-pulse` for staging E2E runs.
+
 ## Local-First Testing — Never Touch the Deploy Box
 
 **All testing and E2E validation MUST happen on the local Kubernetes stack** (`just up` on this machine).

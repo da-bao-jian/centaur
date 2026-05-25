@@ -27,6 +27,8 @@ BUG_LABELS = {"bug", "bugs", "defect", "regression"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 MAX_SECTION_ITEMS = 10
 MAX_OUTSTANDING_PRS = 20
+MAX_ACTIVE_CYCLES = 20
+MAX_ACTIVE_CYCLE_ISSUES = 100
 
 
 def _env_flag_enabled(name: str, default: bool = True) -> bool:
@@ -329,7 +331,10 @@ class LinearPulseClient:
         variables: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         response = await self._http.post("", json={"query": query, "variables": variables or {}})
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Linear API HTTP {response.status_code}: {_shorten(response.text, 500)}"
+            )
         data = response.json()
         if data.get("errors"):
             message = data["errors"][0].get("message", str(data["errors"]))
@@ -363,12 +368,18 @@ class LinearPulseClient:
         *,
         team_keys: list[str],
         report_date: dt.date,
-        limit: int = 50,
+        limit: int = MAX_ACTIVE_CYCLES,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         cycles: list[dict[str, Any]] = []
         teams = team_keys or [None]
         for team_key in teams:
-            cycles.extend(await self._cycles(team_key=team_key, limit=limit))
+            cycles.extend(
+                await self._cycles(
+                    team_key=team_key,
+                    report_date=report_date,
+                    limit=limit,
+                )
+            )
 
         issues: list[dict[str, Any]] = []
         cycle_names: list[str] = []
@@ -420,17 +431,22 @@ class LinearPulseClient:
             limit=limit,
         )
 
-    async def _cycles(self, *, team_key: str | None, limit: int) -> list[dict[str, Any]]:
-        filter_arg = ""
-        team_var = ""
-        variables: dict[str, Any] = {}
+    async def _cycles(
+        self,
+        *,
+        team_key: str | None,
+        report_date: dt.date,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        filters: dict[str, Any] = {
+            "startsAt": {"lte": report_date.isoformat()},
+            "endsAt": {"gte": report_date.isoformat()},
+        }
         if team_key:
-            filter_arg = "filter: { team: { key: { eq: $teamKey } } }, "
-            team_var = ", $teamKey: String"
-            variables["teamKey"] = team_key
+            filters["team"] = {"key": {"eq": team_key}}
         query = f"""
-        query DevPulseCycles($first: Int!, $after: String{team_var}) {{
-          cycles({filter_arg}first: $first, after: $after, orderBy: updatedAt) {{
+        query DevPulseCycles($first: Int!, $after: String, $filter: CycleFilter) {{
+          cycles(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {{
             nodes {{
               id
               name
@@ -438,7 +454,7 @@ class LinearPulseClient:
               startsAt
               endsAt
               team {{ id name key }}
-              issues(first: 250) {{
+              issues(first: {MAX_ACTIVE_CYCLE_ISSUES}) {{
                 nodes {{
                   id
                   identifier
@@ -455,7 +471,7 @@ class LinearPulseClient:
         """
         return await self._paginate_connection(
             query,
-            variables,
+            {"filter": filters},
             connection="cycles",
             limit=limit,
         )

@@ -480,3 +480,119 @@ smoke:
     kubectl exec -n {{namespace}} "$API_DEPLOY" -- curl -s "${AUTH_ARGS[@]}" "http://localhost:8000/agent/executions/${EXECUTION_ID}" | jq
     echo "smoke timed out waiting for execution ${EXECUTION_ID}" >&2
     exit 1
+
+dev-pulse-e2e channel="pris-test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    API_DEPLOY="deploy/{{release}}-centaur-api"
+    CHANNEL="{{channel}}"
+    CHANNEL="${CHANNEL#\#}"
+    if [[ -z "$CHANNEL" ]]; then
+      echo "Slack channel is required, for example: just dev-pulse-e2e pris-test" >&2
+      exit 2
+    fi
+    LOOKBACK_HOURS="${DEV_PULSE_E2E_LOOKBACK_HOURS:-24}"
+    if ! [[ "$LOOKBACK_HOURS" =~ ^[0-9]+$ ]] || [[ "$LOOKBACK_HOURS" -lt 1 ]]; then
+      echo "DEV_PULSE_E2E_LOOKBACK_HOURS must be a positive integer" >&2
+      exit 2
+    fi
+
+    encoded_key="$(kubectl -n {{namespace}} get secret centaur-infra-env -o jsonpath='{.data.SLACKBOT_API_KEY}' 2>/dev/null || true)"
+    API_KEY=""
+    if [[ -n "$encoded_key" ]]; then
+      API_KEY="$(printf '%s' "$encoded_key" | base64 --decode 2>/dev/null || printf '%s' "$encoded_key" | base64 -D)"
+    fi
+    AUTH_ARGS=()
+    if [[ -n "$API_KEY" ]]; then
+      AUTH_ARGS=(-H "Authorization: Bearer ${API_KEY}")
+    fi
+
+    TRIGGER_KEY="dev-pulse-e2e-${CHANNEL}-$(date +%s)"
+    PAYLOAD="$(jq -n \
+      --arg channel "$CHANNEL" \
+      --arg trigger_key "$TRIGGER_KEY" \
+      --argjson lookback_hours "$LOOKBACK_HOURS" \
+      '{
+        workflow_name: "dev_pulse_daily",
+        trigger_key: $trigger_key,
+        eager_start: false,
+        input: {
+          slack_channel: $channel,
+          slack_sender_name: "Pris",
+          lookback_hours: $lookback_hours,
+          metadata: {
+            reason: "dev_pulse_e2e",
+            target_channel: $channel
+          }
+        }
+      }')"
+
+    echo "==> enqueueing dev_pulse_daily E2E run to #${CHANNEL}"
+    CREATE_RESPONSE="$(printf '%s' "$PAYLOAD" | kubectl exec -i -n {{namespace}} "$API_DEPLOY" -- \
+      curl -sS -X POST http://localhost:8000/workflows/runs \
+        -H "Content-Type: application/json" "${AUTH_ARGS[@]}" --data-binary @-)"
+    printf '%s\n' "$CREATE_RESPONSE" | jq
+    RUN_ID="$(printf '%s\n' "$CREATE_RESPONSE" | jq -r '.run_id // empty')"
+    if [[ -z "$RUN_ID" ]]; then
+      echo "workflow run response did not include run_id" >&2
+      exit 1
+    fi
+
+    for _ in $(seq 1 120); do
+      STATE="$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- \
+        curl -sS "${AUTH_ARGS[@]}" "http://localhost:8000/workflows/runs/${RUN_ID}")"
+      STATUS="$(printf '%s\n' "$STATE" | jq -r '.status // empty')"
+      case "$STATUS" in
+        completed)
+          echo "==> workflow completed"
+          printf '%s\n' "$STATE" | jq '{
+            run_id,
+            workflow_name,
+            status,
+            completed_at,
+            slack_channel: .output_json.slack_channel,
+            counts: .output_json.counts
+          }'
+          CHECKPOINTS="$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- \
+            curl -sS "${AUTH_ARGS[@]}" "http://localhost:8000/workflows/runs/${RUN_ID}/checkpoints")"
+          printf '%s\n' "$CHECKPOINTS" | jq '{
+            ok,
+            run_id,
+            checkpoints: [
+              .checkpoints[]
+              | {
+                  checkpoint_name,
+                  step_kind,
+                  created_at,
+                  slack: (
+                    if (.checkpoint_name == "tool_slack_send_message" or .checkpoint_name == "post_dev_pulse_to_slack")
+                    then {channel: .state.channel, ts: .state.ts, permalink: .state.permalink}
+                    else null
+                    end
+                  )
+                }
+            ]
+          }'
+          printf '%s\n' "$CHECKPOINTS" | jq -e '
+            (.checkpoints | any(.checkpoint_name == "collect_dev_pulse_metrics")) and
+            (.checkpoints | any(.checkpoint_name == "tool_slack_send_message")) and
+            (.checkpoints | any(.checkpoint_name == "post_dev_pulse_to_slack"))
+          ' >/dev/null
+          echo "==> verified metrics collection and Slack delivery checkpoints for #${CHANNEL}"
+          exit 0
+          ;;
+        failed|cancelled)
+          printf '%s\n' "$STATE" | jq
+          CHECKPOINTS="$(kubectl exec -n {{namespace}} "$API_DEPLOY" -- \
+            curl -sS "${AUTH_ARGS[@]}" "http://localhost:8000/workflows/runs/${RUN_ID}/checkpoints" || true)"
+          printf '%s\n' "$CHECKPOINTS" | jq . || true
+          exit 1
+          ;;
+      esac
+      sleep 2
+    done
+
+    kubectl exec -n {{namespace}} "$API_DEPLOY" -- \
+      curl -sS "${AUTH_ARGS[@]}" "http://localhost:8000/workflows/runs/${RUN_ID}" | jq
+    echo "dev-pulse E2E timed out waiting for workflow run ${RUN_ID}" >&2
+    exit 1

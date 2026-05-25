@@ -13,6 +13,7 @@ from workflows import dev_pulse_daily  # noqa: E402
 from workflows import dev_pulse_friday_eod  # noqa: E402
 from workflows.dev_pulse_daily import (  # noqa: E402
     Input,
+    LinearPulseClient,
     ReportWindow,
     handler,
     _is_bug_issue,
@@ -53,6 +54,35 @@ def test_bug_issue_detection_uses_labels() -> None:
 
     assert _is_bug_issue(bug) is True
     assert _is_bug_issue(feature) is False
+
+
+@pytest.mark.asyncio
+async def test_active_cycle_query_uses_server_side_date_filter() -> None:
+    class CaptureLinearClient(LinearPulseClient):
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, str, int]] = []
+
+        async def _paginate_connection(self, query, variables, *, connection, limit):
+            self.calls.append((query, variables, connection, limit))
+            return []
+
+    client = CaptureLinearClient()
+
+    await client._cycles(team_key="MOB", report_date=dt.date(2026, 5, 24), limit=20)
+
+    assert len(client.calls) == 1
+    query, variables, connection, limit = client.calls[0]
+    assert connection == "cycles"
+    assert limit == 20
+    assert "$filter: CycleFilter" in query
+    assert "issues(first: 100)" in query
+    assert variables == {
+        "filter": {
+            "startsAt": {"lte": "2026-05-24"},
+            "endsAt": {"gte": "2026-05-24"},
+            "team": {"key": {"eq": "MOB"}},
+        }
+    }
 
 
 def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers() -> None:

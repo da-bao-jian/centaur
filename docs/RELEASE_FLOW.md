@@ -145,3 +145,17 @@ centaur-api:prod-<sha>
 ```
 
 Keep `latest` as a convenience tag only, not as the source of truth.
+
+## Staging E2E Checks
+
+Before promoting dev-pulse workflow changes beyond `staging`, run the real
+Slack delivery E2E against the local stack:
+
+```bash
+just dev-pulse-e2e
+```
+
+The recipe sends the generated report to `#pris-test`, waits for the workflow
+run to finish, and verifies that both metrics collection and Slack delivery
+checkpoints exist. `#dev-pulse` is reserved for scheduled or production-like
+runs, not staging tests.
