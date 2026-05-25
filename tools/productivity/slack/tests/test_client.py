@@ -124,6 +124,21 @@ def test_send_message_omits_unfurl_flags_by_default() -> None:
     assert "unfurl_media" not in fake_web_client.last_kwargs
 
 
+def test_send_message_forwards_sender_overrides() -> None:
+    client, fake_web_client = _make_client()
+
+    client.send_message(
+        "paradigm-pulse",
+        "hello",
+        username="Pris",
+        icon_emoji=":robot_face:",
+    )
+
+    assert fake_web_client.last_kwargs is not None
+    assert fake_web_client.last_kwargs["username"] == "Pris"
+    assert fake_web_client.last_kwargs["icon_emoji"] == ":robot_face:"
+
+
 def test_retry_on_ratelimit_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _ = _make_client()
     now = {"value": 100.0}

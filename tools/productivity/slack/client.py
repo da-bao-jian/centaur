@@ -1544,6 +1544,9 @@ class SlackClient:
         blocks: list | None = None,
         unfurl_links: bool | None = None,
         unfurl_media: bool | None = None,
+        username: str | None = None,
+        icon_url: str | None = None,
+        icon_emoji: str | None = None,
     ) -> dict:
         """Send a message to a channel.
 
@@ -1555,6 +1558,9 @@ class SlackClient:
             blocks: Optional Slack Block Kit blocks for rich formatting
             unfurl_links: Override Slack's link unfurl behavior for this message
             unfurl_media: Override Slack's media unfurl behavior for this message
+            username: Optional display name override for this message
+            icon_url: Optional avatar URL override for this message
+            icon_emoji: Optional emoji avatar override for this message
 
         Returns:
             Dict with channel, ts, permalink
@@ -1577,6 +1583,12 @@ class SlackClient:
                 kwargs["unfurl_links"] = unfurl_links
             if unfurl_media is not None:
                 kwargs["unfurl_media"] = unfurl_media
+            if username:
+                kwargs["username"] = username
+            if icon_url:
+                kwargs["icon_url"] = icon_url
+            if icon_emoji:
+                kwargs["icon_emoji"] = icon_emoji
             response = self._client.chat_postMessage(**kwargs)
             return {
                 "channel": channel_id,
