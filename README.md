@@ -147,6 +147,21 @@ just up
 
 After `just up` finishes, use Slack or the API examples in the [Developer Guide](AGENTS.md#e2e-testing-without-slack).
 
+## Branch Workflow
+
+This checkout uses a fork-based release flow:
+
+```text
+upstream/main -> origin/main -> origin/staging -> origin/prod
+```
+
+`origin` is the controlled fork. `upstream` is the original project and is used
+only for deliberate sync branches. `staging` is the staging deployment branch,
+and `prod` is the live Pris bot deployment branch.
+
+See [docs/RELEASE_FLOW.md](docs/RELEASE_FLOW.md) for the required commands and
+promotion rules.
+
 ## Tools
 
 Tools are small Python plugins. A tool can wrap an internal service, public API, database, search endpoint, deployment system, or anything else an agent should be allowed to use.
