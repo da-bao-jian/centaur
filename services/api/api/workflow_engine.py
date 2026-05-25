@@ -1653,12 +1653,11 @@ def _registered_schedule_specs() -> list[ScheduleSpec]:
                         thread_key=thread_key,
                     )
 
-        # slack_channel: use channel name for delivery (no thread_ts)
-        if slack_channel and "delivery" not in input_json:
-            input_json["delivery"] = {
-                "channel": slack_channel,
-                "platform": "slack",
-            }
+        # Channel-only schedules are delivered by the workflow handler via
+        # ctx.post_to_slack. Final-delivery outbox entries are thread followups
+        # and require a thread_ts, so a bare channel name would dead-letter.
+        if slack_channel:
+            input_json.setdefault("slack_channel", slack_channel)
 
         specs.append(ScheduleSpec(
             schedule_id=sched.get("schedule_id", wf_name),

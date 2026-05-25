@@ -1759,6 +1759,36 @@ async def test_no_delivery_workflow_is_scheduled(db_pool, monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_slack_channel_schedule_does_not_create_thread_delivery(
+    monkeypatch,
+    tmp_path,
+):
+    from api.workflow_engine import (
+        discover_workflow_handlers,
+        _registered_schedule_specs,
+    )
+
+    wf_file = tmp_path / "channel_digest.py"
+    wf_file.write_text(
+        "WORKFLOW_NAME = 'channel_digest'\n"
+        "CRON = '45 7 * * *'\n"
+        "SLACK_CHANNEL = 'team-updates'\n"
+        "async def handler(inp, ctx):\n"
+        "    return {'status': 'ok'}\n"
+    )
+    monkeypatch.setenv("WORKFLOW_DIRS", str(tmp_path))
+    discover_workflow_handlers()
+
+    spec = next(
+        item for item in _registered_schedule_specs()
+        if item.schedule_id == "channel_digest"
+    )
+    input_json = spec.input_json
+    assert input_json["slack_channel"] == "team-updates"
+    assert "delivery" not in input_json
+
+
+@pytest.mark.asyncio
 async def test_handler_discovery(db_pool, monkeypatch, tmp_path):
     from api.workflow_engine import (
         discover_workflow_handlers,
