@@ -6,6 +6,7 @@ Posts to #paradigm-pulse every morning at 7:45am PT.
 from __future__ import annotations
 
 import re
+import os
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -15,6 +16,12 @@ if TYPE_CHECKING:
 WORKFLOW_NAME = "paradigm_pulse_daily"
 CRON = "45 7 * * *"
 SLACK_CHANNEL = "paradigm-pulse"
+SCHEDULE = {
+    "cron": CRON,
+    "slack_channel": os.getenv("PARADIGM_PULSE_SLACK_CHANNEL", SLACK_CHANNEL),
+    "enabled": os.getenv("PARADIGM_PULSE_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"},
+}
 
 _MAX_BLOCK_TEXT = 2900
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s]+)\)")
@@ -207,7 +214,11 @@ def _build_blocks(text: str) -> list[dict[str, Any]]:
 
 
 async def handler(inp: dict[str, Any], ctx: WorkflowContext) -> dict[str, Any]:
-    channel = inp.get("slack_channel") or SLACK_CHANNEL
+    channel = (
+        inp.get("slack_channel")
+        or os.getenv("PARADIGM_PULSE_SLACK_CHANNEL")
+        or SLACK_CHANNEL
+    )
 
     result = await ctx.agent_turn(PROMPT)
     text = str(result.get("result_text") or "").strip()
@@ -223,6 +234,8 @@ async def handler(inp: dict[str, Any], ctx: WorkflowContext) -> dict[str, Any]:
         "unfurl_links": False,
         "unfurl_media": False,
     }
-    await ctx.call_tool("slack", "send_message", args)
+    send_result = await ctx.call_tool("slack", "send_message", args)
+    if isinstance(send_result, dict) and send_result.get("error"):
+        raise RuntimeError(str(send_result["error"]))
     result["slack_text"] = slack_text
     return result
