@@ -102,12 +102,26 @@ async def _status_counts(pool, table: str, window_hours: int) -> dict[str, int]:
 async def _fetch_recent_workflow_failures(pool, window_hours: int, limit: int) -> list[dict[str, Any]]:
     rows = await pool.fetch(
         """
-        SELECT run_id, workflow_name, thread_key, status, error_text, created_at,
-               started_at, completed_at, updated_at
-        FROM workflow_runs
-        WHERE status = 'failed'
-          AND updated_at >= NOW() - ($1::double precision * INTERVAL '1 hour')
-        ORDER BY updated_at DESC
+        WITH recent_failures AS (
+            SELECT run_id, workflow_name, thread_key, status, error_text, created_at,
+                   started_at, completed_at, updated_at
+            FROM workflow_runs
+            WHERE status = 'failed'
+              AND updated_at >= NOW() - ($1::double precision * INTERVAL '1 hour')
+            ORDER BY updated_at DESC
+            LIMIT $2
+        )
+        SELECT f.*,
+               EXISTS (
+                   SELECT 1
+                   FROM workflow_runs newer
+                   WHERE newer.workflow_name = f.workflow_name
+                     AND newer.status = 'completed'
+                     AND COALESCE(newer.completed_at, newer.updated_at, newer.created_at)
+                         > COALESCE(f.completed_at, f.updated_at, f.created_at)
+               ) AS recovered
+        FROM recent_failures f
+        ORDER BY f.updated_at DESC
         LIMIT $2
         """,
         float(window_hours),
@@ -116,11 +130,15 @@ async def _fetch_recent_workflow_failures(pool, window_hours: int, limit: int) -
     return [
         {
             "component": "workflow",
-            "severity": "critical",
+            "severity": "warning" if row["recovered"] else "critical",
             "id": row["run_id"],
-            "title": f"{row['workflow_name']} failed",
+            "title": (
+                f"{row['workflow_name']} failed"
+                + (" (recovered)" if row["recovered"] else "")
+            ),
             "message": row["error_text"] or "workflow failed",
             "status": row["status"],
+            "recovered": bool(row["recovered"]),
             "thread_key": row["thread_key"],
             "created_at": _iso(row["created_at"]),
             "updated_at": _iso(row["updated_at"]),
@@ -733,7 +751,15 @@ def _build_monitors(
     observations: dict[str, Any],
     tool_monitor: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    workflow_failed = int(metrics["workflow_runs_24h"].get("failed", 0))
+    workflow_failures = [
+        item for item in recent_errors if item.get("component") == "workflow"
+    ]
+    unrecovered_workflow_failures = [
+        item for item in workflow_failures if not item.get("recovered")
+    ]
+    recovered_workflow_failures = [
+        item for item in workflow_failures if item.get("recovered")
+    ]
     execution_failed = int(metrics["agent_executions_24h"].get("failed_permanent", 0))
     sandbox_errors = int(metrics["runtime"]["sandbox_sessions"].get("error", 0))
     stuck_running_workflows = stuck_work["running_workflows"]
@@ -754,14 +780,25 @@ def _build_monitors(
     monitors = [
         _monitor(
             "recent_workflow_failures",
-            _status_from_bool(workflow_failed > 0),
+            _status_from_bool(
+                critical=bool(unrecovered_workflow_failures),
+                warning=bool(recovered_workflow_failures),
+            ),
             "Recent workflow failures",
             (
-                f"{workflow_failed} workflow failed in the last 24 hours."
-                if workflow_failed
-                else "No workflow failures in the last 24 hours."
+                f"{len(unrecovered_workflow_failures)} unrecovered workflow failure(s) in the last 24 hours."
+                if unrecovered_workflow_failures
+                else (
+                    f"{len(recovered_workflow_failures)} recovered workflow failure(s) in the last 24 hours."
+                    if recovered_workflow_failures
+                    else "No workflow failures in the last 24 hours."
+                )
             ),
-            evidence={"failed_24h": workflow_failed},
+            evidence={
+                "failed_24h": int(metrics["workflow_runs_24h"].get("failed", 0)),
+                "unrecovered_count": len(unrecovered_workflow_failures),
+                "recovered_count": len(recovered_workflow_failures),
+            },
         ),
         _monitor(
             "stuck_workflows",

@@ -208,6 +208,65 @@ async def test_ops_api_requires_admin_and_serves_browser_shell(client, managed_a
 
 
 @pytest.mark.asyncio
+async def test_ops_summary_marks_later_success_as_recovered_workflow_failure(db_pool):
+    from api.ops_monitors import build_ops_summary
+
+    await _clear_ops_tables(db_pool)
+    suffix = uuid.uuid4().hex[:8]
+
+    await db_pool.execute(
+        """
+        INSERT INTO workflow_schedules (
+            schedule_id, workflow_name, schedule_kind, schedule_expr, timezone,
+            enabled, next_run_at, last_run_at
+        )
+        VALUES (
+            $1, 'dev_pulse_daily', 'cron', '0 0 * * 2-5', 'Asia/Shanghai',
+            TRUE, NOW() + INTERVAL '2 hours', NOW() - INTERVAL '1 day'
+        )
+        """,
+        f"dev-pulse-daily-{suffix}",
+    )
+    await db_pool.execute(
+        """
+        INSERT INTO workflow_runs (
+            run_id, workflow_name, workflow_version, request_hash, root_run_id,
+            status, input_json, output_json, error_text, created_at, started_at,
+            completed_at, updated_at
+        )
+        VALUES
+            (
+                $1, 'dev_pulse_daily', 'old', 'hash-failed', $1,
+                'failed', '{}'::jsonb, NULL, 'Linear returned 400',
+                NOW() - INTERVAL '20 minutes', NOW() - INTERVAL '20 minutes',
+                NOW() - INTERVAL '19 minutes', NOW() - INTERVAL '19 minutes'
+            ),
+            (
+                $2, 'dev_pulse_daily', 'new', 'hash-success', $2,
+                'completed', '{}'::jsonb, $3::jsonb, NULL,
+                NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes',
+                NOW() - INTERVAL '9 minutes', NOW() - INTERVAL '9 minutes'
+            )
+        """,
+        f"wfr-recovered-failed-{suffix}",
+        f"wfr-recovered-success-{suffix}",
+        json.dumps({"slack_channel": "dev-pulse", "counts": {}}),
+    )
+
+    summary = await build_ops_summary(db_pool, include_tools=False)
+
+    monitor = next(item for item in summary["monitors"] if item["id"] == "recent_workflow_failures")
+    assert monitor["status"] == "warning"
+    assert monitor["evidence"]["unrecovered_count"] == 0
+    assert monitor["evidence"]["recovered_count"] == 1
+    workflow_error = next(
+        item for item in summary["recent_errors"] if item["component"] == "workflow"
+    )
+    assert workflow_error["recovered"] is True
+    assert workflow_error["severity"] == "warning"
+
+
+@pytest.mark.asyncio
 async def test_ops_summary_surfaces_dev_pulse_health(db_pool):
     from api.ops_monitors import build_ops_summary
 
