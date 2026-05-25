@@ -705,14 +705,8 @@ def _render_report(inp: Input, window: ReportWindow, metrics: dict[str, Any]) ->
     return "\n".join(lines).strip()
 
 
-async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
-    window = _report_window(inp)
-    metrics = await ctx.step(
-        "collect_dev_pulse_metrics",
-        lambda: _collect_metrics(inp, window),
-    )
-    text = _render_report(inp, window, metrics)
-    await ctx.call_tool(
+async def _post_report_to_slack(inp: Input, ctx: WorkflowContext, text: str) -> dict[str, Any]:
+    return await ctx.call_tool(
         "slack",
         "send_message",
         {
@@ -723,6 +717,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             "unfurl_media": False,
             "username": inp.slack_sender_name.strip() or DEFAULT_SLACK_SENDER_NAME,
         },
+    )
+
+
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    window = _report_window(inp)
+    metrics = await ctx.step(
+        "collect_dev_pulse_metrics",
+        lambda: _collect_metrics(inp, window),
+    )
+    text = _render_report(inp, window, metrics)
+    await ctx.step(
+        "post_dev_pulse_to_slack",
+        lambda: _post_report_to_slack(inp, ctx, text),
     )
     return {
         "window_start": _iso(window.start),

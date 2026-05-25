@@ -109,9 +109,11 @@ def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers()
 
 class _FakeWorkflowContext:
     def __init__(self) -> None:
+        self.step_names: list[str] = []
         self.tool_calls: list[tuple[str, str, dict]] = []
 
-    async def step(self, _name, fn, **_kwargs):
+    async def step(self, name, fn, **_kwargs):
+        self.step_names.append(name)
         result = fn()
         if inspect.isawaitable(result):
             return await result
@@ -142,6 +144,7 @@ async def test_handler_posts_as_pris(monkeypatch: pytest.MonkeyPatch) -> None:
 
     await handler(Input(now="2026-05-26T00:00:00+08:00"), ctx)  # type: ignore[arg-type]
 
+    assert ctx.step_names == ["collect_dev_pulse_metrics", "post_dev_pulse_to_slack"]
     assert ctx.tool_calls
     tool, method, args = ctx.tool_calls[0]
     assert (tool, method) == ("slack", "send_message")
