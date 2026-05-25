@@ -103,8 +103,8 @@ async def _fetch_recent_workflow_failures(pool, window_hours: int, limit: int) -
     rows = await pool.fetch(
         """
         WITH recent_failures AS (
-            SELECT run_id, workflow_name, thread_key, status, error_text, created_at,
-                   started_at, completed_at, updated_at
+            SELECT run_id, workflow_name, thread_key, status, error_text, input_json,
+                   created_at, started_at, completed_at, updated_at
             FROM workflow_runs
             WHERE status = 'failed'
               AND updated_at >= NOW() - ($1::double precision * INTERVAL '1 hour')
@@ -119,6 +119,15 @@ async def _fetch_recent_workflow_failures(pool, window_hours: int, limit: int) -
                      AND newer.status = 'completed'
                      AND COALESCE(newer.completed_at, newer.updated_at, newer.created_at)
                          > COALESCE(f.completed_at, f.updated_at, f.created_at)
+               )
+               OR (
+                   COALESCE(f.input_json->'metadata'->>'source', '') = 'workflow_schedule'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM workflow_schedules sched
+                       WHERE sched.workflow_name = f.workflow_name
+                         AND sched.enabled = TRUE
+                   )
                ) AS recovered
         FROM recent_failures f
         ORDER BY f.updated_at DESC
@@ -189,6 +198,12 @@ async def _fetch_recent_delivery_failures(pool, window_hours: int, limit: int) -
             state = 'dead_letter'
             OR (last_error IS NOT NULL AND last_error <> '')
         )
+          AND NOT (
+              thread_key LIKE 'workflow:%'
+              AND state = 'dead_letter'
+              AND COALESCE(last_error, '') LIKE 'missing_slack_delivery_target:%'
+              AND NULLIF(delivery->>'thread_ts', '') IS NULL
+          )
           AND updated_at >= NOW() - ($1::double precision * INTERVAL '1 hour')
         ORDER BY updated_at DESC
         LIMIT $2
