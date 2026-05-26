@@ -103,6 +103,7 @@
             "replicaCount": { "type": "integer" },
             "image": { "type": "object" },
             "admin": { "type": "object" },
+            "anonymous": { "type": "object" },
             "plugins": {
               "type": "array",
               "items": { "type": "string" }

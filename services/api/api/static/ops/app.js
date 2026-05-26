@@ -8,12 +8,25 @@ const windowSelect = document.querySelector("#window-hours");
 const saveKeyButton = document.querySelector("#save-key");
 const refreshButton = document.querySelector("#refresh");
 
+const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+const hashKey = hashParams.get("api_key") || hashParams.get("key") || "";
+if (hashKey) {
+  sessionStorage.setItem("centaur.ops.apiKey", hashKey.trim());
+  sessionStorage.setItem("centaur.ops.autoAuth", "1");
+  history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+}
+
 const savedKey = sessionStorage.getItem("centaur.ops.apiKey") || "";
-if (savedKey) {
+const autoAuth = sessionStorage.getItem("centaur.ops.autoAuth") === "1";
+if (autoAuth) {
+  keyInput.closest(".field").hidden = true;
+  saveKeyButton.hidden = true;
+} else if (savedKey) {
   keyInput.value = savedKey;
 }
 
 saveKeyButton.addEventListener("click", () => {
+  sessionStorage.removeItem("centaur.ops.autoAuth");
   sessionStorage.setItem("centaur.ops.apiKey", keyInput.value.trim());
   loadSummary();
 });

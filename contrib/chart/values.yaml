@@ -136,6 +136,10 @@ observability:
       password: admin
       existingSecretName: ""
       existingSecretPasswordKey: admin-password
+    anonymous:
+      enabled: false
+      orgRole: Admin
+      hideLogin: true
     plugins:
       - victoriametrics-logs-datasource
     persistence:

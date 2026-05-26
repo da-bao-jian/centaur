@@ -208,10 +208,14 @@ visibility:
     if ! helm status {{release}} -n {{namespace}} >/dev/null 2>&1; then
       just deploy
     fi
+    api_image_tag="${CENTAUR_VISIBILITY_API_IMAGE_TAG:-latest}"
     helm dependency update {{chart}} >/dev/null
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace --reuse-values \
+      --set api.image.tag="$api_image_tag" \
+      --set api.image.pullPolicy=IfNotPresent \
       --set observability.enabled=true \
-      --set api.victoriaMetricsPushEnabled=true
+      --set api.victoriaMetricsPushEnabled=true \
+      --set observability.grafana.anonymous.enabled=true
 
     echo "==> waiting for visibility pods"
     kubectl -n {{namespace}} wait --for=condition=ready pod -l app.kubernetes.io/component=victoriametrics --timeout=300s
@@ -230,19 +234,22 @@ visibility:
     if [[ -n "$encoded_key" ]]; then
       api_key="$(printf '%s' "$encoded_key" | base64 --decode 2>/dev/null || printf '%s' "$encoded_key" | base64 -D 2>/dev/null || true)"
     fi
-    if [[ -n "$api_key" ]] && command -v pbcopy >/dev/null 2>&1; then
-      printf '%s' "$api_key" | pbcopy
-      echo "==> Ops Console API key copied to clipboard"
+    ops_url="http://localhost:8000/ops"
+    if [[ -n "$api_key" ]]; then
+      ops_url="${ops_url}#api_key=${api_key}"
     fi
+    grafana_url="http://localhost:3000/d/centaur-overview/centaur-overview?orgId=1&refresh=30s"
+    metrics_url="http://localhost:8428/vmui/"
+    logs_url="http://localhost:9428/select/vmui/"
 
     echo
     echo "Ops Console:     http://localhost:8000/ops"
-    echo "Grafana:         http://localhost:3000  (admin/admin)"
-    echo "VictoriaMetrics: http://localhost:8428"
-    echo "VictoriaLogs:    http://localhost:9428"
+    echo "Grafana:         ${grafana_url}"
+    echo "VictoriaMetrics: ${metrics_url}"
+    echo "VictoriaLogs:    ${logs_url}"
 
     if command -v open >/dev/null 2>&1; then
-      open http://localhost:8000/ops http://localhost:3000 http://localhost:8428 http://localhost:9428
+      open "$ops_url" "$grafana_url" "$metrics_url" "$logs_url"
     fi
 
 visibility-status:
