@@ -14,6 +14,18 @@ slack_watch_pid := "/tmp/centaur-slack-watch.pid"
 slack_watch_log := "/tmp/centaur-slack-watch.log"
 slack_watch_session := "centaur-slack-watch"
 slack_local_port := "3001"
+visibility_ops_pid := "/tmp/centaur-visibility-ops.pid"
+visibility_ops_log := "/tmp/centaur-visibility-ops.log"
+visibility_ops_session := "centaur-visibility-ops"
+visibility_grafana_pid := "/tmp/centaur-visibility-grafana.pid"
+visibility_grafana_log := "/tmp/centaur-visibility-grafana.log"
+visibility_grafana_session := "centaur-visibility-grafana"
+visibility_vm_pid := "/tmp/centaur-visibility-vm.pid"
+visibility_vm_log := "/tmp/centaur-visibility-vm.log"
+visibility_vm_session := "centaur-visibility-vm"
+visibility_vl_pid := "/tmp/centaur-visibility-vl.pid"
+visibility_vl_log := "/tmp/centaur-visibility-vl.log"
+visibility_vl_session := "centaur-visibility-vl"
 overlay_values := "contrib/chart/values.overlay.yaml"
 overlay_dir := "../centaur-overlay"
 overlay_image := "centaur-overlay:latest"
@@ -147,6 +159,112 @@ status:
 
 logs component:
     kubectl logs -n {{namespace}} deploy/{{release}}-centaur-{{component}} --tail=200 -f
+
+visibility:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    start_pf() {
+      local name="$1"
+      local target="$2"
+      local local_port="$3"
+      local remote_port="$4"
+      local probe_path="$5"
+      local pidfile="$6"
+      local logfile="$7"
+      local session="$8"
+
+      if curl -fsS --max-time 2 "http://127.0.0.1:${local_port}${probe_path}" >/dev/null 2>&1; then
+        echo "==> ${name} already reachable on http://localhost:${local_port}"
+        return 0
+      fi
+
+      command -v tmux >/dev/null || { echo "tmux not installed; brew install tmux" >&2; exit 2; }
+
+      rm -f "$pidfile" "$logfile"
+      echo "==> forwarding ${name}: http://localhost:${local_port}"
+      tmux kill-session -t "$session" 2>/dev/null || true
+      tmux new-session -d -s "$session" "
+        while true; do
+          date '+%Y-%m-%d %H:%M:%S starting ${name} port-forward' >>$logfile
+          kubectl -n {{namespace}} port-forward $target ${local_port}:${remote_port} >>$logfile 2>&1
+          date '+%Y-%m-%d %H:%M:%S ${name} port-forward exited; restarting' >>$logfile
+          sleep 1
+        done
+      "
+      tmux display-message -p -t "$session" '#{pane_pid}' > "$pidfile"
+      for _ in $(seq 1 20); do
+        if curl -fsS --max-time 2 "http://127.0.0.1:${local_port}${probe_path}" >/dev/null 2>&1; then
+          return 0
+        fi
+        sleep 1
+      done
+      echo "port-forward for ${name} did not become ready; log: ${logfile}" >&2
+      tail -n 30 "$logfile" >&2 || true
+      exit 1
+    }
+
+    echo "==> enabling Centaur visibility stack"
+    if ! helm status {{release}} -n {{namespace}} >/dev/null 2>&1; then
+      just deploy
+    fi
+    helm dependency update {{chart}} >/dev/null
+    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace --reuse-values \
+      --set observability.enabled=true \
+      --set api.victoriaMetricsPushEnabled=true
+
+    echo "==> waiting for visibility pods"
+    kubectl -n {{namespace}} wait --for=condition=ready pod -l app.kubernetes.io/component=victoriametrics --timeout=300s
+    kubectl -n {{namespace}} wait --for=condition=ready pod -l app.kubernetes.io/component=victorialogs --timeout=300s
+    kubectl -n {{namespace}} wait --for=condition=ready pod -l app.kubernetes.io/component=grafana --timeout=300s
+    kubectl -n {{namespace}} wait --for=condition=ready pod -l app.kubernetes.io/component=otel-collector --timeout=300s
+    kubectl -n {{namespace}} rollout status deploy/{{release}}-centaur-api --timeout=180s
+
+    start_pf "Ops Console" "deploy/{{release}}-centaur-api" 8000 8000 /health {{visibility_ops_pid}} {{visibility_ops_log}} {{visibility_ops_session}}
+    start_pf "Grafana" "svc/grafana" 3000 3000 /api/health {{visibility_grafana_pid}} {{visibility_grafana_log}} {{visibility_grafana_session}}
+    start_pf "VictoriaMetrics" "svc/victoriametrics" 8428 8428 /health {{visibility_vm_pid}} {{visibility_vm_log}} {{visibility_vm_session}}
+    start_pf "VictoriaLogs" "svc/victorialogs" 9428 9428 /health {{visibility_vl_pid}} {{visibility_vl_log}} {{visibility_vl_session}}
+
+    encoded_key="$(kubectl -n {{namespace}} get secret centaur-infra-env -o jsonpath='{.data.LOCAL_DEV_API_KEY}' 2>/dev/null || true)"
+    api_key=""
+    if [[ -n "$encoded_key" ]]; then
+      api_key="$(printf '%s' "$encoded_key" | base64 --decode 2>/dev/null || printf '%s' "$encoded_key" | base64 -D 2>/dev/null || true)"
+    fi
+    if [[ -n "$api_key" ]] && command -v pbcopy >/dev/null 2>&1; then
+      printf '%s' "$api_key" | pbcopy
+      echo "==> Ops Console API key copied to clipboard"
+    fi
+
+    echo
+    echo "Ops Console:     http://localhost:8000/ops"
+    echo "Grafana:         http://localhost:3000  (admin/admin)"
+    echo "VictoriaMetrics: http://localhost:8428"
+    echo "VictoriaLogs:    http://localhost:9428"
+
+    if command -v open >/dev/null 2>&1; then
+      open http://localhost:8000/ops http://localhost:3000 http://localhost:8428 http://localhost:9428
+    fi
+
+visibility-status:
+    @kubectl -n {{namespace}} get pods,svc | rg 'victoria|grafana|otel|centaur-api|centaur-slackbot' || true
+
+visibility-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for session in {{visibility_ops_session}} {{visibility_grafana_session}} {{visibility_vm_session}} {{visibility_vl_session}}; do
+      tmux kill-session -t "$session" 2>/dev/null || true
+    done
+    for pidfile in {{visibility_ops_pid}} {{visibility_grafana_pid}} {{visibility_vm_pid}} {{visibility_vl_pid}}; do
+      if [[ -f "$pidfile" ]]; then
+        pid="$(cat "$pidfile")"
+        if kill -0 "$pid" 2>/dev/null; then
+          echo "==> killing port-forward pid $pid"
+          kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidfile"
+      fi
+    done
+    rm -f {{visibility_ops_log}} {{visibility_grafana_log}} {{visibility_vm_log}} {{visibility_vl_log}}
 
 slack-thread-logs slack_link since="24h":
     CENTAUR_NAMESPACE={{namespace}} CENTAUR_RELEASE={{release}} bash services/slackbot/scripts/slack-thread-logs.sh "{{slack_link}}" "{{since}}"
