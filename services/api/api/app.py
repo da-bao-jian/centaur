@@ -167,6 +167,37 @@ async def _reconcile_loop() -> None:
             log.warning("reconcile_tick_failed", exc_info=True)
 
 
+def _api_proxy_rotation_check_interval_s() -> int:
+    raw = (os.getenv("KUBERNETES_API_PROXY_ROTATION_CHECK_SECONDS") or "").strip()
+    if not raw:
+        return 300
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning(
+            "invalid_api_proxy_rotation_check_interval",
+            value=raw,
+            default_seconds=300,
+        )
+        return 300
+    return max(value, 30)
+
+
+async def _api_proxy_rotation_loop() -> None:
+    """Roll the API iron-proxy before its generated MITM cert cache expires."""
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.sandbox.registry import get_backend
+
+    while True:
+        await asyncio.sleep(_api_proxy_rotation_check_interval_s())
+        try:
+            backend = get_backend()
+            if isinstance(backend, KubernetesExecutorBackend):
+                await backend.rotate_api_proxy_if_stale()
+        except Exception:
+            log.warning("api_proxy_rotation_check_failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _shutting_down
@@ -196,6 +227,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await sync_registered_workflow_schedules(app.state.db_pool)
     # Bring up the API's own iron-proxy pod (replaces the previously
     # helm-managed deployment).
+    api_proxy_rotation_task = None
     try:
         from api.sandbox.kubernetes import KubernetesExecutorBackend
         from api.sandbox.registry import get_backend
@@ -203,6 +235,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         backend = get_backend()
         if isinstance(backend, KubernetesExecutorBackend):
             await backend.ensure_api_proxy_pod()
+            api_proxy_rotation_task = asyncio.create_task(_api_proxy_rotation_loop())
     except Exception as exc:
         log.warning("api_proxy_pod_bootstrap_failed", error=str(exc))
     if execution_worker_enabled:
@@ -261,6 +294,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await stop_execution_worker()
         if reconcile_task is not None:
             reconcile_task.cancel()
+        if api_proxy_rotation_task is not None:
+            api_proxy_rotation_task.cancel()
         watcher_task.cancel()
         wf_watcher_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -270,6 +305,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if reconcile_task is not None:
             with suppress(asyncio.CancelledError):
                 await reconcile_task
+        if api_proxy_rotation_task is not None:
+            with suppress(asyncio.CancelledError):
+                await api_proxy_rotation_task
         await close_pool(app.state.db_pool)
         log.info("graceful_shutdown_complete")
 
@@ -326,11 +364,15 @@ async def instrument_requests(request, call_next):
 
     if not trace_id and thread_key:
         try:
-            trace_id = await get_or_create_thread_trace_id(request.app.state.db_pool, thread_key)
+            trace_id = await get_or_create_thread_trace_id(
+                request.app.state.db_pool, thread_key
+            )
             if trace_id:
                 structlog.contextvars.bind_contextvars(trace_id=trace_id)
         except Exception:
-            log.debug("thread_trace_lookup_failed", thread_key=thread_key, exc_info=True)
+            log.debug(
+                "thread_trace_lookup_failed", thread_key=thread_key, exc_info=True
+            )
 
     start = time.perf_counter()
     status_code = 500

@@ -171,12 +171,33 @@ Slack ETL workflows:
 
 ## Observability and Retention
 
+The chart can optionally deploy a single-node local/staging observability stack:
+VictoriaMetrics for API metrics, VictoriaLogs for Kubernetes stdout logs,
+Grafana with pre-provisioned datasources and a Centaur overview dashboard, and
+an OpenTelemetry Collector DaemonSet for log shipping.
+
+Enable it with:
+
+```bash
+helm upgrade --install centaur contrib/chart \
+  --set observability.enabled=true \
+  --set api.victoriaMetricsPushEnabled=true
+```
+
 | Env var | Set from | Controls |
 | --- | --- | --- |
 | `VICTORIAMETRICS_URL`, `VICTORIAMETRICS_PUSH_ENABLED` | `api.extraEnv`, `api.victoriaMetricsPushEnabled`. | Push-based API metrics. |
 | `CENTAUR_RETENTION_ATTACHMENTS_TTL_DAYS`, `CENTAUR_RETENTION_TRANSCRIPTS_TTL_DAYS` | `api.extraEnv`. | Attachment/transcript retention TTLs. |
 | `CENTAUR_RETENTION_SWEEP_INTERVAL_SECONDS`, `CENTAUR_RETENTION_BATCH_SIZE`, `CENTAUR_RETENTION_DRY_RUN` | `api.extraEnv`. | Retention sweep cadence, batch size, and dry-run mode. |
 | `TOOL_CALL_TIMEOUT_S`, `TOOL_BINARY_INLINE_MAX_BYTES`, `TOOL_BINARY_PREVIEW_BYTES` | `api.extraEnv`. | Tool execution timeout and binary result handling. |
+
+| Chart value | Default | Controls |
+| --- | --- | --- |
+| `observability.enabled` | `false` | Creates the optional observability workloads. |
+| `observability.victoriaMetrics.serviceName` | `victoriametrics` | In-cluster VictoriaMetrics service used by API metric push and Grafana. |
+| `observability.victoriaLogs.serviceName` | `victorialogs` | In-cluster VictoriaLogs service used by the collector and Grafana. |
+| `observability.grafana.serviceName` | `grafana` | Grafana service with VictoriaMetrics and VictoriaLogs datasources. |
+| `observability.otelCollector.enabled` | `true` | Ships `/var/log/pods` stdout logs for the release namespace to VictoriaLogs. |
 
 ## Local Scripts
 

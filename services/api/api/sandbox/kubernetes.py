@@ -54,6 +54,12 @@ _SANDBOX_OVERLAY_DIR = f"{_SANDBOX_OVERLAY_ROOT}/org"
 _PROXY_LABEL = "centaur.ai/iron-proxy"
 _API_PROXY_POD_NAME = "centaur-api-proxy"
 _API_PROXY_SANDBOX_ID = "api"
+_API_PROXY_CONFIG_HASH_ANNOTATION = "centaur.ai/config-hash"
+_API_PROXY_ROTATED_AT_ANNOTATION = "centaur.ai/rotated-at"
+_API_PROXY_ROTATION_REASON_ANNOTATION = "centaur.ai/rotation-reason"
+_API_PROXY_DEFAULT_MAX_AGE_S = 60 * 60 * 60
+
+
 def _get_rt(session: SandboxSession):
     return runtime_for_session(session)
 
@@ -282,6 +288,37 @@ def _firewall_ca_key_secret_name() -> str:
             "KUBERNETES_FIREWALL_CA_KEY_SECRET_NAME is required for per-sandbox proxy"
         )
     return value
+
+
+def _api_proxy_max_age_s() -> int:
+    raw = (os.getenv("KUBERNETES_API_PROXY_MAX_AGE_SECONDS") or "").strip()
+    if not raw:
+        return _API_PROXY_DEFAULT_MAX_AGE_S
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(
+            "KUBERNETES_API_PROXY_MAX_AGE_SECONDS must be an integer"
+        ) from None
+
+
+def _as_utc_datetime(value: Any) -> dt.datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=dt.UTC)
+        return value.astimezone(dt.UTC)
+    if isinstance(value, str):
+        normalized = value.replace("Z", "+00:00")
+        try:
+            parsed = dt.datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=dt.UTC)
+        return parsed.astimezone(dt.UTC)
+    return None
 
 
 def _resource_name(prefix: str, raw: str, *, max_length: int = 63) -> str:
@@ -970,6 +1007,29 @@ class KubernetesExecutorBackend(SandboxBackend):
             pg_listen_ports,
             restart_policy="Always",
         )
+        annotations = {_API_PROXY_CONFIG_HASH_ANNOTATION: config_hash}
+        existing = None
+        try:
+            existing = await self._apps_api().read_namespaced_deployment(
+                name, _namespace()
+            )
+            existing_annotations = (
+                getattr(
+                    getattr(
+                        getattr(getattr(existing, "spec", None), "template", None),
+                        "metadata",
+                        None,
+                    ),
+                    "annotations",
+                    None,
+                )
+                or {}
+            )
+            annotations = {**existing_annotations, **annotations}
+        except Exception as exc:
+            if not self._is_not_found(exc):
+                raise
+
         body = {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -984,17 +1044,13 @@ class KubernetesExecutorBackend(SandboxBackend):
                 "template": {
                     "metadata": {
                         "labels": labels,
-                        "annotations": {"centaur.ai/config-hash": config_hash},
+                        "annotations": annotations,
                     },
                     "spec": pod_spec,
                 },
             },
         }
-        try:
-            await self._apps_api().read_namespaced_deployment(name, _namespace())
-        except Exception as exc:
-            if not self._is_not_found(exc):
-                raise
+        if existing is None:
             await self._apps_api().create_namespaced_deployment(_namespace(), body)
             return
         await self._apps_api().replace_namespaced_deployment(name, _namespace(), body)
@@ -1675,11 +1731,14 @@ class KubernetesExecutorBackend(SandboxBackend):
         while time.monotonic() < deadline:
             dep = await self._apps_api().read_namespaced_deployment(name, _namespace())
             spec_replicas = (dep.spec.replicas or 0) if dep.spec else 0
+            generation = getattr(getattr(dep, "metadata", None), "generation", None)
             status = dep.status
+            observed = getattr(status, "observed_generation", None)
             ready = getattr(status, "ready_replicas", None) or 0
             updated = getattr(status, "updated_replicas", None) or 0
             if (
-                spec_replicas > 0
+                (observed is None or generation is None or observed >= generation)
+                and spec_replicas > 0
                 and ready >= spec_replicas
                 and updated >= spec_replicas
             ):
@@ -1731,6 +1790,91 @@ class KubernetesExecutorBackend(SandboxBackend):
             config_hash=config_hash,
             pg_secrets=[s.name for s, _ in pg_secrets],
         )
+
+    async def rotate_api_proxy_if_stale(self, *, max_age_s: int | None = None) -> bool:
+        """Roll the API iron-proxy Deployment before generated MITM certs expire."""
+        await self._ensure_clients()
+        threshold_s = _api_proxy_max_age_s() if max_age_s is None else max_age_s
+        if threshold_s <= 0:
+            return False
+
+        name = _proxy_pod_name(_API_PROXY_SANDBOX_ID)
+        deployment = await self._apps_api().read_namespaced_deployment(
+            name, _namespace()
+        )
+        status = getattr(deployment, "status", None)
+        spec = getattr(deployment, "spec", None)
+        replicas = getattr(spec, "replicas", None) or 1
+        ready = getattr(status, "ready_replicas", None) or 0
+        updated = getattr(status, "updated_replicas", None) or 0
+        observed = getattr(status, "observed_generation", None)
+        generation = getattr(getattr(deployment, "metadata", None), "generation", None)
+        if observed is not None and generation is not None and observed < generation:
+            log.info("api_proxy_rotation_skipped_rollout_in_progress", deployment=name)
+            return False
+        if ready < replicas or updated < replicas:
+            log.info(
+                "api_proxy_rotation_skipped_rollout_in_progress",
+                deployment=name,
+                ready_replicas=ready,
+                updated_replicas=updated,
+                replicas=replicas,
+            )
+            return False
+
+        pods = await self._core_api().list_namespaced_pod(
+            _namespace(),
+            label_selector=(
+                f"{_PROXY_LABEL}=true,centaur.ai/sandbox-id={_API_PROXY_SANDBOX_ID}"
+            ),
+        )
+        now = dt.datetime.now(dt.UTC)
+        stale: list[tuple[str, float]] = []
+        for pod in getattr(pods, "items", []) or []:
+            metadata = getattr(pod, "metadata", None)
+            if getattr(metadata, "deletion_timestamp", None) is not None:
+                continue
+            created_at = _as_utc_datetime(getattr(metadata, "creation_timestamp", None))
+            if created_at is None:
+                continue
+            age_s = (now - created_at).total_seconds()
+            if age_s >= threshold_s:
+                stale.append((getattr(metadata, "name", ""), age_s))
+
+        if not stale:
+            return False
+
+        rotated_at = now.isoformat()
+        await self._apps_api().patch_namespaced_deployment(
+            name,
+            _namespace(),
+            {
+                "spec": {
+                    "template": {
+                        "metadata": {
+                            "annotations": {
+                                _API_PROXY_ROTATED_AT_ANNOTATION: rotated_at,
+                                _API_PROXY_ROTATION_REASON_ANNOTATION: (
+                                    "mitm-leaf-cert-preexpiry"
+                                ),
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        log.warning(
+            "api_proxy_rotation_requested",
+            deployment=name,
+            max_age_s=threshold_s,
+            stale_pods=[
+                {"name": pod_name, "age_s": round(age_s, 3)}
+                for pod_name, age_s in stale
+            ],
+            rotated_at=rotated_at,
+        )
+        await self._wait_deployment_ready(name)
+        return True
 
     async def _apply_proxy_configmap_data(
         self, name: str, sandbox_id: str, rendered: str

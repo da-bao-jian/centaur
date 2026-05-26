@@ -88,6 +88,70 @@ api:
   extraEnv: {}
   resources: {}
 
+observability:
+  # Optional single-node observability stack for local/staging deployments.
+  # The API already exposes /metrics and structured JSON stdout logs; enabling
+  # this stack stores metrics in VictoriaMetrics, stores Kubernetes stdout logs
+  # in VictoriaLogs, and provisions Grafana datasources/dashboards.
+  enabled: false
+  environment: ""
+  victoriaMetrics:
+    enabled: true
+    serviceName: victoriametrics
+    replicaCount: 1
+    image:
+      repository: victoriametrics/victoria-metrics
+      tag: v1.143.0
+      pullPolicy: IfNotPresent
+    retentionPeriod: 7d
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: ""
+    resources: {}
+  victoriaLogs:
+    enabled: true
+    serviceName: victorialogs
+    replicaCount: 1
+    image:
+      repository: victoriametrics/victoria-logs
+      tag: v1.49.0
+      pullPolicy: IfNotPresent
+    retentionPeriod: 7d
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: ""
+    resources: {}
+  grafana:
+    enabled: true
+    serviceName: grafana
+    replicaCount: 1
+    image:
+      repository: grafana/grafana
+      tag: 13.0.1
+      pullPolicy: IfNotPresent
+    admin:
+      user: admin
+      password: admin
+      existingSecretName: ""
+      existingSecretPasswordKey: admin-password
+    plugins:
+      - victoriametrics-logs-datasource
+    persistence:
+      enabled: true
+      size: 2Gi
+      storageClassName: ""
+    resources: {}
+  otelCollector:
+    enabled: true
+    image:
+      repository: otel/opentelemetry-collector-contrib
+      tag: 0.152.1
+      pullPolicy: IfNotPresent
+    logLevel: info
+    resources: {}
+
 overlay:
   mountPath: /app/overlay/org
   systemPrompt: ""

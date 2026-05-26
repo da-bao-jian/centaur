@@ -66,6 +66,62 @@
         "companyContextDocumentsIntervalSeconds": { "type": "integer" }
       }
     },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "environment": { "type": "string" },
+        "victoriaMetrics": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "serviceName": { "type": "string" },
+            "replicaCount": { "type": "integer" },
+            "image": { "type": "object" },
+            "retentionPeriod": { "type": "string" },
+            "persistence": { "type": "object" },
+            "resources": { "type": "object" }
+          }
+        },
+        "victoriaLogs": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "serviceName": { "type": "string" },
+            "replicaCount": { "type": "integer" },
+            "image": { "type": "object" },
+            "retentionPeriod": { "type": "string" },
+            "persistence": { "type": "object" },
+            "resources": { "type": "object" }
+          }
+        },
+        "grafana": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "serviceName": { "type": "string" },
+            "replicaCount": { "type": "integer" },
+            "image": { "type": "object" },
+            "admin": { "type": "object" },
+            "plugins": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "persistence": { "type": "object" },
+            "resources": { "type": "object" }
+          }
+        },
+        "otelCollector": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": { "type": "object" },
+            "logLevel": { "type": "string" },
+            "resources": { "type": "object" }
+          }
+        }
+      }
+    },
     "overlay": {
       "type": "object",
       "properties": {

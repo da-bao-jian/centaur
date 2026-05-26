@@ -1,0 +1,594 @@
+{{- $obs := .Values.observability -}}
+{{- if $obs.enabled -}}
+{{- $environment := default .Release.Namespace $obs.environment -}}
+{{- $vm := $obs.victoriaMetrics -}}
+{{- $vl := $obs.victoriaLogs -}}
+{{- $grafana := $obs.grafana -}}
+{{- $otel := $obs.otelCollector -}}
+{{- if $vm.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ required "observability.victoriaMetrics.serviceName is required" $vm.serviceName | quote }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "victoriametrics") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victoriametrics") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8428
+      targetPort: 8428
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "victoriametrics") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "victoriametrics") | nindent 4 }}
+spec:
+  serviceName: {{ required "observability.victoriaMetrics.serviceName is required" $vm.serviceName | quote }}
+  replicas: {{ $vm.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victoriametrics") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victoriametrics") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: victoriametrics
+          image: {{ printf "%s:%s" $vm.image.repository $vm.image.tag | quote }}
+          imagePullPolicy: {{ $vm.image.pullPolicy }}
+          args:
+            - -httpListenAddr=:8428
+            - -storageDataPath=/victoria-metrics-data
+            - {{ printf "-retentionPeriod=%s" $vm.retentionPeriod | quote }}
+            - -selfScrapeInterval=15s
+          ports:
+            - containerPort: 8428
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+{{ toYaml $vm.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /victoria-metrics-data
+      {{- if not $vm.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if $vm.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $vm.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $vm.persistence.size }}
+  {{- else }}
+  volumeClaimTemplates: []
+  {{- end }}
+---
+{{- end }}
+{{- if $vl.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ required "observability.victoriaLogs.serviceName is required" $vl.serviceName | quote }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "victorialogs") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 4 }}
+  ports:
+    - name: http
+      port: 9428
+      targetPort: 9428
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "victorialogs") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "victorialogs") | nindent 4 }}
+spec:
+  serviceName: {{ required "observability.victoriaLogs.serviceName is required" $vl.serviceName | quote }}
+  replicas: {{ $vl.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: victorialogs
+          image: {{ printf "%s:%s" $vl.image.repository $vl.image.tag | quote }}
+          imagePullPolicy: {{ $vl.image.pullPolicy }}
+          args:
+            - -httpListenAddr=:9428
+            - -storageDataPath=/victoria-logs-data
+            - {{ printf "-retentionPeriod=%s" $vl.retentionPeriod | quote }}
+          ports:
+            - containerPort: 9428
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9428
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9428
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+{{ toYaml $vl.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /victoria-logs-data
+      {{- if not $vl.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if $vl.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $vl.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $vl.persistence.size }}
+  {{- else }}
+  volumeClaimTemplates: []
+  {{- end }}
+---
+{{- end }}
+{{- if and $grafana.enabled $vm.enabled $vl.enabled }}
+{{- $grafanaAdminSecretName := default (printf "%s-grafana-admin" (include "centaur.fullname" .)) $grafana.admin.existingSecretName -}}
+{{- if not $grafana.admin.existingSecretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $grafanaAdminSecretName | quote }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+type: Opaque
+stringData:
+  {{ $grafana.admin.existingSecretPasswordKey }}: {{ $grafana.admin.password | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "grafana-provisioning") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+data:
+  datasources.yaml: |-
+    apiVersion: 1
+    datasources:
+      - name: VictoriaMetrics
+        type: prometheus
+        uid: victoriametrics
+        access: proxy
+        url: http://{{ $vm.serviceName }}:8428
+        isDefault: true
+        editable: true
+        jsonData:
+          httpMethod: POST
+          timeInterval: 15s
+      - name: VictoriaLogs
+        type: victoriametrics-logs-datasource
+        uid: victorialogs
+        access: proxy
+        url: http://{{ $vl.serviceName }}:9428
+        editable: true
+  dashboards.yaml: |-
+    apiVersion: 1
+    providers:
+      - name: Centaur
+        orgId: 1
+        folder: Centaur
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /etc/grafana/provisioning/dashboards/centaur
+  centaur-overview.json: |-
+    {
+      "uid": "centaur-overview",
+      "title": "Centaur Overview",
+      "tags": ["centaur"],
+      "timezone": "browser",
+      "schemaVersion": 41,
+      "version": 1,
+      "refresh": "30s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "HTTP Requests",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total[5m])) by (status)", "legendFormat": "{{`{{status}}`}}"}
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Execution Requests",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "sum(agent_execution_requests) by (status)", "legendFormat": "{{`{{status}}`}}"}
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Workflow Runs",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "sum(workflow_runs) by (status)", "legendFormat": "{{`{{status}}`}}"}
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Tool Calls",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "victoriametrics"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "sum(rate(agent_tool_calls_total[5m])) by (tool_name, success)", "legendFormat": "{{`{{tool_name}} {{success}}`}}"}
+          ]
+        }
+      ]
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ required "observability.grafana.serviceName is required" $grafana.serviceName | quote }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+spec:
+  selector:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "grafana") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+spec:
+  serviceName: {{ required "observability.grafana.serviceName is required" $grafana.serviceName | quote }}
+  replicas: {{ $grafana.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/grafana-provisioning: {{ toJson (dict "grafana" $grafana "metrics" $vm.serviceName "logs" $vl.serviceName "installer" "init-v1") | sha256sum }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 472
+        fsGroupChangePolicy: OnRootMismatch
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $grafana.plugins }}
+      initContainers:
+        - name: grafana-plugin-install
+          image: {{ printf "%s:%s" $grafana.image.repository $grafana.image.tag | quote }}
+          imagePullPolicy: {{ $grafana.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              IFS=','
+              for plugin in $GRAFANA_PLUGINS; do
+                plugin="$(printf '%s' "$plugin" | xargs)"
+                [ -n "$plugin" ] || continue
+                if [ -d "/var/lib/grafana/plugins/$plugin" ]; then
+                  echo "plugin already installed: $plugin"
+                  continue
+                fi
+                grafana cli --pluginsDir /var/lib/grafana/plugins plugins install "$plugin"
+              done
+          env:
+            - name: GRAFANA_PLUGINS
+              value: {{ join "," $grafana.plugins | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 472
+            runAsUser: 472
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+      {{- end }}
+      containers:
+        - name: grafana
+          image: {{ printf "%s:%s" $grafana.image.repository $grafana.image.tag | quote }}
+          imagePullPolicy: {{ $grafana.image.pullPolicy }}
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: {{ $grafana.admin.user | quote }}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $grafanaAdminSecretName | quote }}
+                  key: {{ $grafana.admin.existingSecretPasswordKey | quote }}
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES
+              value: "false"
+            - name: GF_ANALYTICS_CHECK_FOR_UPDATES
+              value: "false"
+            - name: GF_PLUGINS_PLUGIN_ADMIN_ENABLED
+              value: "false"
+            - name: GF_PLUGINS_PREINSTALL_DISABLED
+              value: "true"
+            - name: GF_PLUGINS_PREINSTALL_AUTO_UPDATE
+              value: "false"
+            {{- if $grafana.plugins }}
+            - name: GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS
+              value: {{ join "," $grafana.plugins | quote }}
+            {{- end }}
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+{{ toYaml $grafana.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 472
+            runAsUser: 472
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
+              subPath: dashboards.yaml
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/dashboards/centaur/centaur-overview.json
+              subPath: centaur-overview.json
+      volumes:
+        - name: provisioning
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "grafana-provisioning") }}
+      {{- if not $grafana.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if $grafana.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $grafana.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $grafana.persistence.size }}
+  {{- else }}
+  volumeClaimTemplates: []
+  {{- end }}
+---
+{{- end }}
+{{- if and $otel.enabled $vl.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "otel-collector") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "otel-collector") | nindent 4 }}
+data:
+  config.yaml: |-
+    extensions:
+      file_storage:
+        directory: /var/lib/otelcol/file_storage
+      health_check:
+        endpoint: ${env:MY_POD_IP}:13133
+
+    receivers:
+      file_log:
+        include:
+          - /var/log/pods/{{ .Release.Namespace }}_*/*/*.log
+        exclude:
+          - /var/log/pods/{{ .Release.Namespace }}_*/*otel-collector*/*.log
+        start_at: end
+        include_file_path: true
+        include_file_name: false
+        storage: file_storage
+        operators:
+          - type: container
+            id: container-parser
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1000
+      resource/centaur:
+        attributes:
+          - key: service.namespace
+            value: {{ .Release.Namespace | quote }}
+            action: upsert
+          - key: deployment.environment
+            value: {{ $environment | quote }}
+            action: upsert
+
+    exporters:
+      otlp_http/victorialogs:
+        logs_endpoint: http://{{ $vl.serviceName }}:9428/insert/opentelemetry/v1/logs
+        headers:
+          VL-Stream-Fields: service.namespace,deployment.environment
+
+    service:
+      extensions: [file_storage, health_check]
+      telemetry:
+        logs:
+          level: {{ $otel.logLevel | quote }}
+      pipelines:
+        logs:
+          receivers: [file_log]
+          processors: [resource/centaur, batch]
+          exporters: [otlp_http/victorialogs]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "otel-collector") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "otel-collector") | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "otel-collector") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/otel-config: {{ toJson (dict "namespace" .Release.Namespace "environment" $environment "victorialogs" $vl.serviceName "logLevel" $otel.logLevel "receiver" "file_log" "exporter" "otlp_http" "storage" "file_storage") | sha256sum }}
+      labels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "otel-collector") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: otel-collector
+          image: {{ printf "%s:%s" $otel.image.repository $otel.image.tag | quote }}
+          imagePullPolicy: {{ $otel.image.pullPolicy }}
+          args:
+            - --config=/etc/otelcol/config.yaml
+          env:
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - containerPort: 13133
+              name: health
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+{{ toYaml $otel.resources | nindent 12 }}
+          securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol/config.yaml
+              subPath: config.yaml
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: file-storage
+              mountPath: /var/lib/otelcol/file_storage
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "centaur.componentName" (dict "root" . "component" "otel-collector") }}
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: file-storage
+          emptyDir: {}
+---
+{{- end }}
+{{- end }}

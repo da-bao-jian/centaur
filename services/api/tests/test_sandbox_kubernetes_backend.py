@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import sys
 import types
@@ -102,6 +103,65 @@ class FakeCoreApi:
                     SimpleNamespace(metadata=SimpleNamespace(name=metadata["name"]))
                 )
         return SimpleNamespace(items=items)
+
+
+class FakeAppsApi:
+    def __init__(self) -> None:
+        self.created_deployments: list[tuple[str, dict]] = []
+        self.replaced_deployments: list[tuple[str, str, dict]] = []
+        self.patched_deployments: list[tuple[str, str, dict]] = []
+        self.deployment_to_read: SimpleNamespace | Exception | None = None
+
+    async def read_namespaced_deployment(
+        self, name: str, namespace: str
+    ) -> SimpleNamespace:
+        if self.deployment_to_read is None:
+            exc = Exception("not found")
+            exc.status = 404  # type: ignore[attr-defined]
+            raise exc
+        if isinstance(self.deployment_to_read, Exception):
+            raise self.deployment_to_read
+        return self.deployment_to_read
+
+    async def create_namespaced_deployment(self, namespace: str, body: dict) -> None:
+        self.created_deployments.append((namespace, body))
+        self.deployment_to_read = _deployment_from_body(body)
+
+    async def replace_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.replaced_deployments.append((namespace, name, body))
+        self.deployment_to_read = _deployment_from_body(body)
+
+    async def patch_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.patched_deployments.append((namespace, name, body))
+
+
+def _deployment_from_body(body: dict) -> SimpleNamespace:
+    metadata = body.get("metadata", {})
+    spec = body.get("spec", {})
+    template = spec.get("template", {})
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=metadata.get("name"),
+            generation=1,
+        ),
+        spec=SimpleNamespace(
+            replicas=spec.get("replicas", 1),
+            template=SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations=template.get("metadata", {}).get("annotations", {})
+                )
+            ),
+        ),
+        status=SimpleNamespace(
+            observed_generation=1,
+            ready_replicas=spec.get("replicas", 1),
+            updated_replicas=spec.get("replicas", 1),
+        ),
+    )
 
 
 class FakeWebSocket:
@@ -792,6 +852,120 @@ async def test_per_sandbox_proxy_uses_bootstrap_secret_for_onepassword(
         {"secretRef": {"name": "centaur-infra-env"}},
         {"secretRef": {"name": "centaur-bootstrap"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_api_proxy_deployment_preserves_rotation_annotations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_apps = FakeAppsApi()
+    backend._apps = fake_apps
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+
+    fake_apps.deployment_to_read = _deployment_from_body(
+        {
+            "metadata": {"name": "centaur-api-proxy"},
+            "spec": {
+                "replicas": 1,
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "centaur.ai/config-hash": "old",
+                            "centaur.ai/rotated-at": "2026-05-26T00:00:00+00:00",
+                            "centaur.ai/rotation-reason": "mitm-leaf-cert-preexpiry",
+                        }
+                    }
+                },
+            },
+        }
+    )
+
+    await backend._apply_api_proxy_deployment([], {}, "new-hash")
+
+    body = fake_apps.replaced_deployments[0][2]
+    annotations = body["spec"]["template"]["metadata"]["annotations"]
+    assert annotations["centaur.ai/config-hash"] == "new-hash"
+    assert annotations["centaur.ai/rotated-at"] == "2026-05-26T00:00:00+00:00"
+    assert annotations["centaur.ai/rotation-reason"] == "mitm-leaf-cert-preexpiry"
+
+
+@pytest.mark.asyncio
+async def test_rotate_api_proxy_if_stale_rolls_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+    fake_apps.deployment_to_read = _deployment_from_body(
+        {"metadata": {"name": "centaur-api-proxy"}, "spec": {"replicas": 1}}
+    )
+    stale_created_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=120)
+    fake_core.pod_list_items = [
+        SimpleNamespace(
+            metadata=SimpleNamespace(
+                name="centaur-api-proxy-old",
+                creation_timestamp=stale_created_at,
+                deletion_timestamp=None,
+            )
+        )
+    ]
+
+    rotated = await backend.rotate_api_proxy_if_stale(max_age_s=60)
+
+    assert rotated is True
+    assert fake_core.list_pod_calls == [
+        (
+            "centaur",
+            "centaur.ai/iron-proxy=true,centaur.ai/sandbox-id=api",
+        )
+    ]
+    patch = fake_apps.patched_deployments[0][2]
+    annotations = patch["spec"]["template"]["metadata"]["annotations"]
+    assert "centaur.ai/rotated-at" in annotations
+    assert annotations["centaur.ai/rotation-reason"] == "mitm-leaf-cert-preexpiry"
+
+
+@pytest.mark.asyncio
+async def test_rotate_api_proxy_if_stale_skips_fresh_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+    fake_apps.deployment_to_read = _deployment_from_body(
+        {"metadata": {"name": "centaur-api-proxy"}, "spec": {"replicas": 1}}
+    )
+    fake_core.pod_list_items = [
+        SimpleNamespace(
+            metadata=SimpleNamespace(
+                name="centaur-api-proxy-fresh",
+                creation_timestamp=dt.datetime.now(dt.UTC),
+                deletion_timestamp=None,
+            )
+        )
+    ]
+
+    rotated = await backend.rotate_api_proxy_if_stale(max_age_s=60)
+
+    assert rotated is False
+    assert fake_apps.patched_deployments == []
 
 
 @pytest.mark.asyncio

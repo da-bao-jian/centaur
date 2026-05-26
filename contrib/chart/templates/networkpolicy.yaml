@@ -132,6 +132,33 @@ spec:
         - protocol: TCP
           port: {{ .Values.ironProxy.service.pgPortRangeStart }}
           endPort: {{ .Values.ironProxy.service.pgPortRangeEnd }}
+{{- if and .Values.observability.enabled .Values.observability.victoriaMetrics.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victoriametrics") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8428
+{{- end }}
+{{- if and .Values.observability.enabled .Values.observability.victoriaLogs.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9428
+{{- end }}
+{{- if and .Values.observability.enabled .Values.observability.grafana.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3000
+{{- end }}
     - ports:
         - protocol: TCP
           port: 443
@@ -326,6 +353,139 @@ spec:
         - protocol: TCP
           port: 443
 ---
+{{- end }}
+{{- if .Values.observability.enabled }}
+{{- if .Values.observability.victoriaMetrics.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "victoriametrics") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "victoriametrics") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victoriametrics") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- if .Values.observability.grafana.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 14 }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 8428
+---
+{{- end }}
+{{- if .Values.observability.victoriaLogs.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "victorialogs") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "victorialogs") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- if .Values.observability.grafana.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 14 }}
+{{- end }}
+{{- if .Values.observability.otelCollector.enabled }}
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "otel-collector") | nindent 14 }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 9428
+---
+{{- end }}
+{{- if and .Values.observability.grafana.enabled .Values.observability.victoriaMetrics.enabled .Values.observability.victoriaLogs.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "grafana") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "grafana") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "api") | nindent 14 }}
+{{- range $ingressSourceNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victoriametrics") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8428
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9428
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+{{- end }}
+{{- if and .Values.observability.otelCollector.enabled .Values.observability.victoriaLogs.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "centaur.componentName" (dict "root" . "component" "otel-collector") }}
+  labels:
+{{ include "centaur.componentLabels" (dict "root" . "component" "otel-collector") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "otel-collector") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+{{ include "centaur.componentSelectorLabels" (dict "root" . "component" "victorialogs") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9428
+---
+{{- end }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -361,6 +361,10 @@ spec:
 {{- end }}
             - name: VICTORIAMETRICS_PUSH_ENABLED
               value: {{ ternary "1" "0" .Values.api.victoriaMetricsPushEnabled | quote }}
+{{- if and .Values.observability.enabled .Values.observability.victoriaMetrics.enabled (not (hasKey $apiExtraEnv "VICTORIAMETRICS_URL")) }}
+            - name: VICTORIAMETRICS_URL
+              value: {{ printf "http://%s:8428" .Values.observability.victoriaMetrics.serviceName | quote }}
+{{- end }}
 {{- if .Values.slackbot.enabled }}
             - name: SLACKBOT_URL
               value: {{ printf "http://%s:3001" (include "centaur.componentName" (dict "root" . "component" "slackbot")) | quote }}

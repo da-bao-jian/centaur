@@ -17,13 +17,14 @@ WORKDIR /app
 
 # 1. Install core deps (changes rarely — cached layer)
 COPY services/api/pyproject.toml ./
+COPY services/api/uv.lock ./
 COPY centaur_sdk/ centaur_sdk/
 RUN sed -i \
         -e 's|path = "../../centaur_sdk"|path = "centaur_sdk"|' \
-        pyproject.toml \
-    && rm -f uv.lock
+        -e 's|"../../centaur_sdk"|"centaur_sdk"|g' \
+        pyproject.toml uv.lock
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-project --no-dev
+    uv sync --no-install-project --no-dev --frozen
 
 # 2. Install tool deps from tools/**/pyproject.toml (changes rarely — cached layer)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -45,7 +46,7 @@ COPY services/sandbox/SYSTEM_PROMPT.md services/sandbox/SYSTEM_PROMPT.md
 COPY tools/ tools/
 COPY workflows/ workflows/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --inexact
+    uv sync --no-dev --inexact --frozen
 
 COPY services/api/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
