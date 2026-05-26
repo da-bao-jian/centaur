@@ -37,6 +37,9 @@ build:
       for pid in "${pids[@]}"; do
         wait "$pid" || status=1
       done
+      if [[ "$status" -eq 0 ]]; then
+        just _load-local-images
+      fi
       exit "$status"
     fi
 
@@ -45,17 +48,20 @@ _build-all-sequential:
     just _build-iron-proxy
     just _build-slackbot
     just _build-agent
+    just _load-local-images
 
 build-one service:
     #!/usr/bin/env bash
     set -euo pipefail
+    image=""
     case "{{service}}" in
-      api) just _build-api ;;
-      iron-proxy) just _build-iron-proxy ;;
-      slackbot) just _build-slackbot ;;
-      agent|sandbox) just _build-agent ;;
+      api) just _build-api; image="centaur-api:latest" ;;
+      iron-proxy) just _build-iron-proxy; image="centaur-iron-proxy:latest" ;;
+      slackbot) just _build-slackbot; image="centaur-slackbot:latest" ;;
+      agent|sandbox) just _build-agent; image="centaur-agent:latest" ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
+    just _kind-load-image "$image"
 
 _build-api:
     docker build -t centaur-api:latest -f services/api/Dockerfile .
@@ -68,6 +74,25 @@ _build-slackbot:
 
 _build-agent:
     docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
+
+_load-local-images:
+    just _kind-load-image centaur-api:latest
+    just _kind-load-image centaur-iron-proxy:latest
+    just _kind-load-image centaur-slackbot:latest
+    just _kind-load-image centaur-agent:latest
+
+_kind-load-image image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v kind >/dev/null 2>&1; then
+      echo "kind is not installed; skipping local cluster load for {{image}}"
+      exit 0
+    fi
+    if ! kind get clusters 2>/dev/null | grep -Fxq "{{kind_cluster}}"; then
+      echo "kind cluster {{kind_cluster}} not found; skipping local cluster load for {{image}}"
+      exit 0
+    fi
+    kind load docker-image "{{image}}" --name "{{kind_cluster}}"
 
 bootstrap-secrets *args:
     contrib/scripts/bootstrap-k8s-secrets.sh --namespace {{namespace}} {{args}}
