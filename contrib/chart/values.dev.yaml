@@ -14,9 +14,12 @@ postgres:
 
 slackbot:
   enabled: false
+  image:
+    pullPolicy: IfNotPresent
 
 api:
   executionWorkerEnabled: true
+  pluginWatcherEnabled: true
   egressDiscovery:
     enabled: false
   extraEnv:
@@ -37,9 +40,6 @@ ironProxy:
 sandbox:
   image:
     pullPolicy: IfNotPresent
-
-laminar:
-  enabled: true
 
 codexTokenRotator:
   enabled: true

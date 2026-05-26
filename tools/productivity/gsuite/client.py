@@ -1,18 +1,21 @@
 """GSuite API client for Gmail, Calendar, and Drive."""
 
 import base64
+import io
+import mimetypes
 import os
 import re
+import urllib.request
 from email.mime.text import MIMEText
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urljoin, urlparse, urlsplit
 
 import httplib2
 import socks
-from centaur_sdk import save_attachment
+from centaur_sdk import current_thread_key, save_attachment, secret
 from google.auth.credentials import AnonymousCredentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 
 def _build_http() -> httplib2.Http:
@@ -724,35 +727,89 @@ def drive_download(file_id: str) -> dict:
     )
 
 
+def _download_attachment_bytes(
+    *,
+    attachment_id: str | None = None,
+    attachment_url: str | None = None,
+) -> bytes:
+    """Fetch bytes from Centaur's thread-scoped attachment API."""
+    path = attachment_url
+    if attachment_id:
+        path = f"/agent/attachments/{attachment_id}/download"
+    if not path:
+        raise ValueError("attachment_id or attachment_url is required")
+
+    base_url = secret("CENTAUR_API_URL", "http://api:8000").rstrip("/")
+    base_parts = urlparse(base_url)
+    if path.startswith(("http://", "https://")):
+        url_parts = urlparse(path)
+        if (url_parts.scheme, url_parts.netloc) != (base_parts.scheme, base_parts.netloc):
+            raise ValueError("attachment_url must point at the configured Centaur API")
+        url = path
+    else:
+        if not path.startswith("/agent/attachments/"):
+            raise ValueError("attachment_url must be a Centaur attachment download path")
+        url = urljoin(f"{base_url}/", path.lstrip("/"))
+
+    sep = "&" if urlparse(url).query else "?"
+    url = f"{url}{sep}thread_key={quote(current_thread_key(), safe='')}"
+
+    headers: dict[str, str] = {}
+    api_key = secret("CENTAUR_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read()
+
+
 def drive_upload(
-    file_path: str,
+    content_base64: str | None = None,
     name: str | None = None,
     folder_id: str | None = None,
     mime_type: str | None = None,
     convert_to_sheets: bool = False,
+    attachment_id: str | None = None,
+    attachment_url: str | None = None,
+    filename: str | None = None,
 ) -> dict:
     """Upload a file to Google Drive.
 
+    Accepts one of: content_base64, attachment_id, or attachment_url.
+    There is deliberately no local-path option: this tool runs in-process on
+    the API server, so a caller-supplied path would read the API host's
+    filesystem. Sandboxes pass bytes via content_base64 or a Centaur attachment
+    handle instead.
+
     Args:
-        file_path: Local path to the file
-        name: File name in Drive (defaults to local filename)
+        content_base64: Base64-encoded file bytes
+        name: File name in Drive
         folder_id: Parent folder ID
         mime_type: MIME type (auto-detected if not provided)
         convert_to_sheets: If True, convert the file to a Google Sheet (useful for CSV files)
+        attachment_id: Centaur attachment ID to upload
+        attachment_url: Centaur attachment download URL/path to upload
+        filename: Fallback file name when name is omitted
 
     Returns:
         Dict with id, name, web_view_link
     """
-    import mimetypes
-
     service = get_drive_service()
 
-    path = Path(file_path)
-    if not path.exists():
-        raise RuntimeError(f"File not found: {file_path}")
+    upload_bytes: bytes
+    if content_base64:
+        upload_bytes = base64.b64decode(content_base64)
+        file_name = name or filename or "upload.bin"
+    elif attachment_id or attachment_url:
+        upload_bytes = _download_attachment_bytes(
+            attachment_id=attachment_id,
+            attachment_url=attachment_url,
+        )
+        file_name = name or filename or f"{attachment_id or 'attachment'}.bin"
+    else:
+        raise ValueError("One of content_base64, attachment_id, or attachment_url is required")
 
-    file_name = name or path.name
-    content_type = mime_type or mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    content_type = mime_type or mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
     metadata = {"name": file_name}
     if folder_id:
@@ -761,7 +818,7 @@ def drive_upload(
         # Tell Google Drive to convert the uploaded file to a native Google Sheet
         metadata["mimeType"] = "application/vnd.google-apps.spreadsheet"
 
-    media = MediaFileUpload(file_path, mimetype=content_type, resumable=True)
+    media = MediaIoBaseUpload(io.BytesIO(upload_bytes), mimetype=content_type, resumable=True)
 
     result = (
         service.files()
@@ -1471,31 +1528,36 @@ def docs_get_text(document_id: str) -> str:
         return extract_text_from_content(content)
 
 
-def docs_append(document_id: str, text: str, tab_id: str | None = None) -> dict:
+def docs_append(
+    document_id: str,
+    text: str,
+    tab_id: str | None = None,
+    expected_revision_id: str | None = None,
+) -> dict:
     """Append text to a Google Doc.
 
     Args:
         document_id: The document ID
         text: Text to append
         tab_id: Optional tab ID to append to
+        expected_revision_id: Optional document revision that must still be current.
+            When set, the write is rejected by Google if the document changed since
+            this revision was observed, preventing accidental overwrites of
+            concurrent human edits.
 
     Returns:
         Dict with document ID
     """
-    service = get_docs_service()
-
     requests = [{"insertText": {"location": {"index": 1}, "text": text}}]
-
     if tab_id:
         requests[0]["insertText"]["location"]["tabId"] = tab_id
 
-    result = (
-        service.documents()
-        .batchUpdate(documentId=document_id, body={"requests": requests})
-        .execute()
+    result = docs_batch_update(
+        document_id,
+        requests,
+        required_revision_id=expected_revision_id,
     )
-
-    return {"document_id": result.get("documentId", "")}
+    return {"document_id": result.get("document_id", "")}
 
 
 def docs_insert_page_break(document_id: str, index: int = 1) -> dict:
@@ -1650,19 +1712,25 @@ def docs_bullets(
     return summary
 
 
-def docs_replace(document_id: str, old_text: str, new_text: str) -> dict:
+def docs_replace(
+    document_id: str,
+    old_text: str,
+    new_text: str,
+    expected_revision_id: str | None = None,
+) -> dict:
     """Find and replace text in a Google Doc.
 
     Args:
         document_id: The document ID
         old_text: Text to find
         new_text: Text to replace with
+        expected_revision_id: Optional document revision that must still be
+            current. When set, Google rejects the write if the document changed
+            since this revision was observed.
 
     Returns:
         Dict with document ID and occurrences replaced
     """
-    service = get_docs_service()
-
     requests = [
         {
             "replaceAllText": {
@@ -1672,10 +1740,10 @@ def docs_replace(document_id: str, old_text: str, new_text: str) -> dict:
         }
     ]
 
-    result = (
-        service.documents()
-        .batchUpdate(documentId=document_id, body={"requests": requests})
-        .execute()
+    result = docs_batch_update(
+        document_id,
+        requests,
+        required_revision_id=expected_revision_id,
     )
 
     occurrences = 0
@@ -1684,33 +1752,38 @@ def docs_replace(document_id: str, old_text: str, new_text: str) -> dict:
             occurrences = reply["replaceAllText"].get("occurrencesChanged", 0)
 
     return {
-        "document_id": result.get("documentId", ""),
+        "document_id": result.get("document_id", ""),
         "occurrences_replaced": occurrences,
     }
 
 
-def docs_insert(document_id: str, text: str, index: int) -> dict:
+def docs_insert(
+    document_id: str,
+    text: str,
+    index: int,
+    expected_revision_id: str | None = None,
+) -> dict:
     """Insert text at a specific position in a Google Doc.
 
     Args:
         document_id: The document ID
         text: Text to insert
         index: Position to insert at (1 = beginning)
+        expected_revision_id: Optional document revision that must still be
+            current. When set, Google rejects the write if the document changed
+            since this revision was observed.
 
     Returns:
         Dict with document ID
     """
-    service = get_docs_service()
-
     requests = [{"insertText": {"location": {"index": index}, "text": text}}]
 
-    result = (
-        service.documents()
-        .batchUpdate(documentId=document_id, body={"requests": requests})
-        .execute()
+    result = docs_batch_update(
+        document_id,
+        requests,
+        required_revision_id=expected_revision_id,
     )
-
-    return {"document_id": result.get("documentId", "")}
+    return {"document_id": result.get("document_id", "")}
 
 
 def docs_create(title: str, content: str | None = None) -> dict:
@@ -2651,30 +2724,39 @@ class GSuiteClient:
 
     def drive_upload(
         self,
-        file_path: str,
+        content_base64: str | None = None,
         name: str | None = None,
         folder_id: str | None = None,
         mime_type: str | None = None,
         convert_to_sheets: bool = False,
+        attachment_id: str | None = None,
+        attachment_url: str | None = None,
+        filename: str | None = None,
     ) -> dict:
         """Upload a file to Google Drive.
 
         Args:
-            file_path: Local path to the file
-            name: File name in Drive (defaults to local filename)
+            content_base64: Base64-encoded file bytes
+            name: File name in Drive
             folder_id: Parent folder ID
             mime_type: MIME type (auto-detected if not provided)
             convert_to_sheets: If True, convert the file to a Google Sheet (useful for CSV files)
+            attachment_id: Centaur attachment ID to upload
+            attachment_url: Centaur attachment download URL/path to upload
+            filename: Fallback file name when name is omitted
 
         Returns:
             Dict with id, name, web_view_link
         """
         return drive_upload(
-            file_path,
+            content_base64=content_base64,
             name=name,
             folder_id=folder_id,
             mime_type=mime_type,
             convert_to_sheets=convert_to_sheets,
+            attachment_id=attachment_id,
+            attachment_url=attachment_url,
+            filename=filename,
         )
 
     def drive_create_folder(self, name: str, parent_id: str | None = None) -> dict:
@@ -2844,18 +2926,32 @@ class GSuiteClient:
         """
         return docs_get_text(document_id)
 
-    def docs_append(self, document_id: str, text: str, tab_id: str | None = None) -> dict:
+    def docs_append(
+        self,
+        document_id: str,
+        text: str,
+        tab_id: str | None = None,
+        expected_revision_id: str | None = None,
+    ) -> dict:
         """Append text to a Google Doc.
 
         Args:
             document_id: The document ID
             text: Text to append
             tab_id: Optional tab ID to append to
+            expected_revision_id: Optional document revision that must still be
+                current. When set, Google rejects the write if the document
+                changed since this revision was observed.
 
         Returns:
             Dict with document ID
         """
-        return docs_append(document_id, text, tab_id=tab_id)
+        return docs_append(
+            document_id,
+            text,
+            tab_id=tab_id,
+            expected_revision_id=expected_revision_id,
+        )
 
     def docs_insert_page_break(self, document_id: str, index: int = 1) -> dict:
         """Insert a page break in a Google Doc.
@@ -2918,31 +3014,59 @@ class GSuiteClient:
             dry_run=dry_run,
         )
 
-    def docs_replace(self, document_id: str, old_text: str, new_text: str) -> dict:
+    def docs_replace(
+        self,
+        document_id: str,
+        old_text: str,
+        new_text: str,
+        expected_revision_id: str | None = None,
+    ) -> dict:
         """Find and replace text in a Google Doc.
 
         Args:
             document_id: The document ID
             old_text: Text to find
             new_text: Text to replace with
+            expected_revision_id: Optional document revision that must still be
+                current. When set, Google rejects the write if the document
+                changed since this revision was observed.
 
         Returns:
             Dict with document ID and occurrences replaced
         """
-        return docs_replace(document_id, old_text, new_text)
+        return docs_replace(
+            document_id,
+            old_text,
+            new_text,
+            expected_revision_id=expected_revision_id,
+        )
 
-    def docs_insert(self, document_id: str, text: str, index: int) -> dict:
+    def docs_insert(
+        self,
+        document_id: str,
+        text: str,
+        index: int,
+        expected_revision_id: str | None = None,
+    ) -> dict:
         """Insert text at a specific position in a Google Doc.
 
         Args:
             document_id: The document ID
             text: Text to insert
             index: Position to insert at (1 = beginning)
+            expected_revision_id: Optional document revision that must still be
+                current. When set, Google rejects the write if the document
+                changed since this revision was observed.
 
         Returns:
             Dict with document ID
         """
-        return docs_insert(document_id, text, index)
+        return docs_insert(
+            document_id,
+            text,
+            index,
+            expected_revision_id=expected_revision_id,
+        )
 
     def docs_create(self, title: str, content: str | None = None) -> dict:
         """Create a new Google Doc.

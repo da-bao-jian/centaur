@@ -19,13 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.api_keys import bootstrap_service_api_keys
 from api.config import settings
 from api.db import close_pool, create_pool
-from api.laminar_tracing import (
-    initialize_laminar,
-    install_laminar_compat,
-    set_span_attributes,
-    set_trace_context,
-    start_span,
-)
 from api.logging_config import configure_structlog
 from api.retention import start_retention_sweeper, stop_retention_sweeper
 from api.trace_context import get_or_create_thread_trace_id, traceparent_from_trace_id
@@ -41,6 +34,7 @@ from api.routers import (
     deprecated,
     health,
     ops,
+    webhooks as webhooks_mod,
 )
 from api.routers import agent as agent_router_mod
 from api.routers import workflows as workflow_router_mod
@@ -61,8 +55,6 @@ from api.workflow_engine import (
 from api.warm_pool import start_replenish_loop, stop_replenish_loop
 
 configure_structlog()
-install_laminar_compat()
-initialize_laminar(service="api")
 
 log = structlog.get_logger().bind(service="api")
 
@@ -112,8 +104,19 @@ for _uvi_name in ("uvicorn.access",):
     logging.getLogger(_uvi_name).propagate = False
 
 
+def _plugin_watcher_enabled() -> bool:
+    return os.getenv("PLUGIN_WATCHER_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
 async def _watch_tools(pm: ToolManager) -> None:
     """Watch all plugin directories and auto-reload when files change."""
+    if not _plugin_watcher_enabled():
+        log.info("tool_watcher_disabled", reason="plugin_watcher_disabled")
+        return
     from starlette.concurrency import run_in_threadpool
     from watchfiles import awatch
 
@@ -131,6 +134,9 @@ async def _watch_tools(pm: ToolManager) -> None:
 
 async def _watch_workflows() -> None:
     """Watch external workflow directories and auto-reload when files change."""
+    if not _plugin_watcher_enabled():
+        log.info("workflow_watcher_disabled", reason="plugin_watcher_disabled")
+        return
     from watchfiles import awatch
 
     watch_dirs = [d for d in get_workflow_dirs() if d.exists()]
@@ -332,45 +338,14 @@ async def instrument_requests(request, call_next):
     try:
         route = request.scope.get("route")
         path = getattr(route, "path", None) or request.url.path
-        with start_span(
-            name="centaur.api.http_request",
-            span_type="DEFAULT",
-            metadata={
-                "service": "api",
-                "trace_id": trace_id,
-                "thread_key": thread_key,
-                "http_method": request.method,
-                "http_path": path,
-            },
-            trace_id=trace_id,
-        ):
-            set_trace_context(
-                session_id=trace_id or thread_key,
-                metadata={
-                    "service": "api",
-                    "environment": os.getenv("CENTAUR_ENVIRONMENT", "local"),
-                    "trace_id": trace_id,
-                    "thread_key": thread_key,
-                    "http_path": path,
-                },
-            )
-            response = await call_next(request)
-            status_code = response.status_code
-            if trace_id:
-                response.headers["X-Trace-Id"] = trace_id
-                traceparent = traceparent_from_trace_id(trace_id)
-                if traceparent:
-                    response.headers["traceparent"] = traceparent
-            set_span_attributes(
-                {
-                    "http.method": request.method,
-                    "http.route": path,
-                    "http.status_code": status_code,
-                    **({"centaur.trace_id": trace_id} if trace_id else {}),
-                    **({"centaur.thread_key": thread_key} if thread_key else {}),
-                }
-            )
-            return response
+        response = await call_next(request)
+        status_code = response.status_code
+        if trace_id:
+            response.headers["X-Trace-Id"] = trace_id
+            traceparent = traceparent_from_trace_id(trace_id)
+            if traceparent:
+                response.headers["traceparent"] = traceparent
+        return response
     finally:
         HTTP_REQUESTS_IN_PROGRESS.dec()
         route = request.scope.get("route")
@@ -400,6 +375,7 @@ app.include_router(health.router)
 app.include_router(ops.router)
 app.include_router(agent_router_mod.router)
 app.include_router(workflow_router_mod.router)
+app.include_router(webhooks_mod.router)
 app.include_router(attachments_mod.router)
 app.include_router(admin.router)
 app.include_router(deprecated.router)

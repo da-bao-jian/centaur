@@ -32,7 +32,9 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from api.agent import _insert_system_message
 from api import slackbot_client
+from api.harness_config import default_harness
 from api.runtime_control import (
     ControlPlaneError,
     append_message,
@@ -51,8 +53,7 @@ from api.vm_metrics import (
     record_workflow_run_enqueued,
     record_workflow_run_terminal,
 )
-from api.laminar_tracing import set_trace_context, start_span
-from api.trace_context import get_or_create_thread_trace_id
+from api.webhooks import clear_webhook_specs, register_workflow_webhooks
 
 log = structlog.get_logger()
 
@@ -930,7 +931,7 @@ async def _compute_agent_session_title(
     if persona and (not harness or harness == persona):
         harness = _persona_default_engine(persona) or (None if harness == persona else harness)
     if not persona and not harness:
-        harness = "codex"
+        harness = default_harness()
     parts = ["Centaur"]
     if persona:
         parts.append(str(persona))
@@ -970,6 +971,44 @@ async def _compute_agent_session_header(
         engine=engine,
         harness=harness,
     )
+
+
+def _history_has_assistant_message(history_messages: Any) -> bool:
+    if not isinstance(history_messages, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("role") or "").strip().lower() == "assistant"
+        for item in history_messages
+    )
+
+
+async def _thread_has_prior_slack_agent_reply(pool, thread_key: str) -> bool:
+    if await pool.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM agent_execution_requests "
+        "WHERE thread_key = $1 AND COALESCE(delivery->>'platform', '') = 'slack' "
+        "AND COALESCE(metadata->>'slackbot_agent_session_id', '') <> '')",
+        thread_key,
+    ):
+        return True
+    return bool(
+        await pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM agent_message_requests "
+            "WHERE thread_key = $1 AND event_json->>'type' = 'assistant')",
+            thread_key,
+        )
+    )
+
+
+async def _should_show_agent_session_header(
+    pool,
+    *,
+    thread_key: str,
+    history_messages: Any,
+) -> bool:
+    if _history_has_assistant_message(history_messages):
+        return False
+    return not await _thread_has_prior_slack_agent_reply(pool, thread_key)
 
 
 def _assignment_display_engine(active: dict[str, Any]) -> str | None:
@@ -1181,8 +1220,18 @@ async def do_agent_turn(
         session_title = await _compute_agent_session_title(
             ctx._pool, effective_thread_key, selector,
         )
-        session_header = await _compute_agent_session_header(
-            ctx._pool, effective_thread_key, selector,
+        session_header = (
+            await _compute_agent_session_header(
+                ctx._pool,
+                effective_thread_key,
+                selector,
+            )
+            if await _should_show_agent_session_header(
+                ctx._pool,
+                thread_key=effective_thread_key,
+                history_messages=effective_history,
+            )
+            else None
         )
         slackbot_session_id = await slackbot_client.open_agent_session(
             delivery=effective_delivery,
@@ -1194,6 +1243,23 @@ async def do_agent_turn(
         if slackbot_session_id:
             effective_metadata["slackbot_agent_session_id"] = slackbot_session_id
             effective_metadata["slackbot_live_delivery"] = True
+
+        effective_platform = str(effective_delivery.get("platform") or "").strip().lower()
+        if effective_platform == "slack" or effective_thread_key.startswith("slack:"):
+            requester_user_id = (
+                str(
+                    effective_delivery.get("recipient_user_id")
+                    or effective_delivery.get("user_id")
+                    or effective_metadata.get("user_id")
+                    or "",
+                ).strip()
+                or None
+            )
+            await _insert_system_message(
+                effective_thread_key,
+                effective_platform or "slack",
+                user_id=requester_user_id,
+            )
 
         if isinstance(effective_history, list):
             backfilled = 0
@@ -1482,6 +1548,19 @@ def _load_workflow_file(
             schedule=schedule,
         )
         discovered[wf_name] = str(py_file)
+        try:
+            register_workflow_webhooks(
+                wf_name,
+                str(py_file),
+                getattr(mod, "WEBHOOKS", None),
+            )
+        except Exception:
+            log.warning(
+                "workflow_webhook_registration_failed",
+                workflow_name=wf_name,
+                file=str(py_file),
+                exc_info=True,
+            )
     except Exception:
         log.warning("workflow_handler_load_failed", file=str(py_file), exc_info=True)
 
@@ -1505,6 +1584,7 @@ def discover_workflow_handlers() -> dict[str, str]:
     """
     global _WORKFLOW_HANDLERS
     _WORKFLOW_HANDLERS.clear()
+    clear_webhook_specs()
     discovered: dict[str, str] = {}
 
     # 1. Built-in workflows (api.workflows package)
@@ -2280,18 +2360,6 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
     run_input = decode_jsonb(run_row.get("input_json"), {})
     if not isinstance(run_input, dict):
         run_input = {}
-    thread_key = str(run_input.get("thread_key") or run_input.get("trigger_key") or "")
-    trace_id = None
-    if thread_key:
-        try:
-            trace_id = await get_or_create_thread_trace_id(pool, thread_key)
-        except Exception:
-            log.debug(
-                "workflow_trace_lookup_failed",
-                thread_key=thread_key,
-                exc_info=True,
-            )
-
     created_at = run_row.get("created_at")
     if created_at and isinstance(created_at, dt.datetime):
         aware = (
@@ -2350,32 +2418,7 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         name=f"workflow-lease-{run_id}",
     )
 
-    span_cm = start_span(
-        name="centaur.api.workflow_run",
-        span_type="DEFAULT",
-        metadata={
-            "service": "api",
-            "trace_id": trace_id,
-            "thread_key": thread_key,
-            "workflow_run_id": run_id,
-            "workflow_name": workflow_name,
-            "worker_id": worker_id,
-        },
-        trace_id=trace_id,
-    )
-    span_cm.__enter__()
     try:
-        set_trace_context(
-            session_id=trace_id or thread_key or None,
-            metadata={
-                "service": "api",
-                "environment": os.getenv("CENTAUR_ENVIRONMENT", "local"),
-                "trace_id": trace_id,
-                "thread_key": thread_key,
-                "workflow_run_id": run_id,
-                "workflow_name": workflow_name,
-            },
-        )
         result = await registered.handler(params, ctx)
         # Handler completed normally → mark run as completed
         updated = await pool.execute(
@@ -2555,7 +2598,6 @@ async def _run_handler(pool, run_row: dict[str, Any]) -> None:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
-        span_cm.__exit__(*sys.exc_info())
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────

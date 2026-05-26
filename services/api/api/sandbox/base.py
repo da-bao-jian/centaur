@@ -136,6 +136,14 @@ class SandboxBackend(abc.ABC):
         """Return backend sandbox IDs managed by Centaur and old enough to prune."""
         return []
 
+    async def pause_by_id(self, sandbox_id: str) -> None:
+        """Pause a sandbox while retaining resumable state."""
+        await self.stop_by_id(sandbox_id)
+
+    async def resume_by_id(self, sandbox_id: str) -> None:
+        """Resume a paused sandbox if the backend supports it."""
+        return None
+
     async def interrupt_by_id(self, sandbox_id: str) -> None:
         """Interrupt the active turn for a sandbox without destroying it."""
         raise NotImplementedError

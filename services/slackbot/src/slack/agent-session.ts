@@ -118,6 +118,7 @@ const FINAL_PLAN_TITLE_CHARS = slackReplyLimits.finalPlan.taskTitleChars
 const FINAL_PLAN_DETAILS_LINES = slackReplyLimits.finalPlan.taskDetailsCodeBlockLines
 const FINAL_PLAN_OUTPUT_LINES = slackReplyLimits.finalPlan.taskOutputCodeBlockLines
 const MAX_LIVE_TEXT_CHARS = slackReplyLimits.stream.maxLiveTextChars
+const DURABLE_STREAMED_ANSWER_TASK_THRESHOLD = 10
 
 export class AgentSessionRenderer {
   constructor(private readonly client: WebClient) {}
@@ -299,7 +300,9 @@ export class AgentSessionRenderer {
     const commentaryMarkdown = state.finalCommentaryMarkdown?.trim() ?? ''
     const answerSource =
       state.finalAnswerMarkdown?.trim() || segment.streamedText.trim() || segment.textParts.join('')
-    const answerMarkdown = finalMarkdownForBlocks(answerSource)
+    const answerMarkdown = finalMarkdownForFinalBlocks(answerSource, segment, {
+      includeStreamedText: originalTasks.length >= DURABLE_STREAMED_ANSWER_TASK_THRESHOLD
+    })
     const streamedTextLive =
       Boolean(segment.streamedText.trim()) && segment.streamedText.length < MAX_LIVE_TEXT_CHARS
     const showThinking =
@@ -647,8 +650,40 @@ function compactTaskBody(body: StreamTask['details'], maxLines: number): StreamT
   return richText([preformatted(clipLines(text, maxLines), language)])
 }
 
-function finalMarkdownForBlocks(markdown: string): string {
-  return clipText(markdown, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+function finalMarkdownForFinalBlocks(
+  markdown: string,
+  segment: Segment,
+  opts: { includeStreamedText?: boolean } = {}
+): string {
+  const trimmed = markdown.trim()
+  if (!trimmed) return ''
+  if (opts.includeStreamedText || !segment.streamedText.trim()) {
+    return clipText(trimmed, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+  }
+  const streamedPrefix = unstreamedMarkdownAfterLivePrefix(markdown, segment.streamedText)
+  if (streamedPrefix !== null) {
+    return clipText(streamedPrefix, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+  }
+  const unstreamed = markdown.slice(segment.streamedTextSourceChars).trim()
+  if (!unstreamed) return ''
+  return clipText(unstreamed, slackReplyLimits.mixedBodyAndPlan.maxVisibleChars)
+}
+
+function unstreamedMarkdownAfterLivePrefix(markdown: string, streamedText: string): string | null {
+  if (!streamedText.trim()) return null
+  if (markdown.startsWith(streamedText)) return markdown.slice(streamedText.length).trim()
+
+  const normalizedMarkdown = normalizeFinalMarkdownPrefix(markdown)
+  const normalizedStreamed = normalizeFinalMarkdownPrefix(streamedText)
+  if (!normalizedMarkdown.startsWith(normalizedStreamed)) return null
+  return normalizedMarkdown.slice(normalizedStreamed.length).trim()
+}
+
+function normalizeFinalMarkdownPrefix(markdown: string): string {
+  return markdown
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+$/gm, '')
+    .trim()
 }
 
 function clipText(value: string, maxChars: number): string {

@@ -23,10 +23,6 @@ _HARNESS_STUB_KEYS = (
 
 _SANDBOX_PASSTHROUGH_ENV_KEYS = (
     "CODEX_OTEL_ENVIRONMENT",
-    "CODEX_OTEL_LAMINAR_ENDPOINT",
-    "CODEX_OTEL_LAMINAR_BASE_URL",
-    "LMNR_BASE_URL",
-    "LMNR_PROJECT_API_KEY",
     # ChatGPT-plan auth: the cron rotates id_token + account_id into
     # centaur-infra-env (envFrom on the API container); these get copied
     # into each sandbox so codex can build the Chatgpt-Account-Id header.
