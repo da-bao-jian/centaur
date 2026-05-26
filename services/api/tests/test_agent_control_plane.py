@@ -310,6 +310,66 @@ async def test_spawn_assignment_explicit_persona_overrides_default_env_var(
 
 
 @pytest.mark.asyncio
+async def test_get_or_spawn_cold_spawns_when_suspended_resume_fails(db_pool):
+    from api import agent as agent_module
+
+    thread_key = f"slack:T-test:D-test:{uuid.uuid4().hex}"
+    stale_runtime_id = f"rt-stale-{uuid.uuid4().hex[:8]}"
+    replacement_runtime_id = f"rt-new-{uuid.uuid4().hex[:8]}"
+    agent_thread_id = f"T-{uuid.uuid4().hex[:12]}"
+
+    await db_pool.execute(
+        "INSERT INTO sandbox_sessions ("
+        "thread_key, sandbox_id, harness, engine, state, started_at, "
+        "agent_thread_id, last_delivered_id"
+        ") VALUES ($1, $2, 'amp', 'amp', 'suspended', NOW(), $3, 'cursor-1')",
+        thread_key,
+        stale_runtime_id,
+        agent_thread_id,
+    )
+
+    replacement_session = SandboxSession(
+        sandbox_id=replacement_runtime_id,
+        thread_key=thread_key,
+        harness="amp",
+        engine="amp",
+    )
+    backend = SimpleNamespace(
+        status=AsyncMock(return_value="suspended"),
+        resume_by_id=AsyncMock(side_effect=RuntimeError("sandbox failed to resume")),
+        stop_by_id=AsyncMock(),
+        create=AsyncMock(return_value=replacement_session),
+    )
+
+    with (
+        patch("api.agent.get_backend", return_value=backend),
+        patch("api.agent._drop_runtime") as drop_runtime,
+    ):
+        session = await agent_module.get_or_spawn(thread_key, "amp")
+
+    assert session.sandbox_id == replacement_runtime_id
+    backend.resume_by_id.assert_awaited_once_with(stale_runtime_id)
+    backend.stop_by_id.assert_awaited_once_with(stale_runtime_id)
+    drop_runtime.assert_called_once_with(stale_runtime_id)
+    backend.create.assert_awaited_once()
+    create_args = backend.create.await_args.args
+    create_kwargs = backend.create.await_args.kwargs
+    assert create_args[:3] == (thread_key, "amp", "amp")
+    assert create_kwargs["resume_thread_id"] == agent_thread_id
+
+    row = await db_pool.fetchrow(
+        "SELECT sandbox_id, state, agent_thread_id, last_delivered_id "
+        "FROM sandbox_sessions WHERE thread_key = $1",
+        thread_key,
+    )
+    assert row is not None
+    assert row["sandbox_id"] == replacement_runtime_id
+    assert row["state"] == "idle"
+    assert row["agent_thread_id"] == agent_thread_id
+    assert row["last_delivered_id"] == "cursor-1"
+
+
+@pytest.mark.asyncio
 async def test_db_insert_session_initial_state_tracks_inflight_turn(db_pool):
     from api.agent import _db_insert_session
 
