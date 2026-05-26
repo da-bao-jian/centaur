@@ -481,6 +481,230 @@ smoke:
     echo "smoke timed out waiting for execution ${EXECUTION_ID}" >&2
     exit 1
 
+pris-e2e channel="pris-test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    API_DEPLOY="deploy/{{release}}-centaur-api"
+    SLACKBOT_WEBHOOK_URL="http://{{release}}-centaur-slackbot:{{slack_local_port}}/api/webhooks/slack"
+    CHANNEL="{{channel}}"
+    CHANNEL="${CHANNEL#\#}"
+    if [[ -z "$CHANNEL" ]]; then
+      echo "Slack channel is required, for example: just pris-e2e pris-test" >&2
+      exit 2
+    fi
+
+    decode_secret() {
+      local key="$1"
+      local encoded
+      encoded="$(kubectl -n {{namespace}} get secret centaur-infra-env -o jsonpath="{.data.${key}}" 2>/dev/null || true)"
+      if [[ -z "$encoded" ]]; then
+        echo "centaur-infra-env is missing ${key}" >&2
+        return 1
+      fi
+      printf '%s' "$encoded" | base64 --decode 2>/dev/null || printf '%s' "$encoded" | base64 -D
+    }
+
+    SLACK_BOT_TOKEN="$(decode_secret SLACK_BOT_TOKEN)"
+    SLACK_SIGNING_SECRET="$(decode_secret SLACK_SIGNING_SECRET)"
+    if [[ -z "$SLACK_BOT_TOKEN" || -z "$SLACK_SIGNING_SECRET" ]]; then
+      echo "Slack bot token/signing secret are required for pris-e2e" >&2
+      exit 2
+    fi
+
+    slack_api_json() {
+      local method="$1"
+      local payload="$2"
+      curl -fsS "https://slack.com/api/${method}" \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        -H "Content-Type: application/json; charset=utf-8" \
+        --data "$payload"
+    }
+
+    slack_api_get() {
+      local method="$1"
+      shift
+      curl -fsS -G "https://slack.com/api/${method}" \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        "$@"
+    }
+
+    require_slack_ok() {
+      local method="$1"
+      local response="$2"
+      if ! printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null; then
+        echo "Slack ${method} failed:" >&2
+        printf '%s\n' "$response" | jq >&2
+        exit 1
+      fi
+    }
+
+    AUTH_TEST="$(slack_api_json auth.test '{}')"
+    require_slack_ok auth.test "$AUTH_TEST"
+    TEAM_ID="$(printf '%s\n' "$AUTH_TEST" | jq -r '.team_id')"
+    BOT_USER_ID="$(printf '%s\n' "$AUTH_TEST" | jq -r '.user_id')"
+    if [[ -z "$TEAM_ID" || "$TEAM_ID" == "null" || -z "$BOT_USER_ID" || "$BOT_USER_ID" == "null" ]]; then
+      echo "auth.test did not return team_id and user_id" >&2
+      printf '%s\n' "$AUTH_TEST" | jq >&2
+      exit 1
+    fi
+
+    CHANNEL_ID=""
+    if [[ -n "${PRIS_E2E_CHANNEL_ID:-}" ]]; then
+      CHANNEL_ID="$PRIS_E2E_CHANNEL_ID"
+    elif [[ "$CHANNEL" == "pris-test" ]]; then
+      CHANNEL_ID="${PRIS_TEST_CHANNEL_ID:-C0B5G1HMAVD}"
+    elif [[ "$CHANNEL" =~ ^[CGD][A-Z0-9]+$ ]]; then
+      CHANNEL_ID="$CHANNEL"
+    else
+      cursor=""
+      for _ in $(seq 1 20); do
+        LIST_ARGS=(
+          --data-urlencode "types=public_channel,private_channel"
+          --data-urlencode "exclude_archived=true"
+          --data-urlencode "limit=1000"
+        )
+        if [[ -n "$cursor" ]]; then
+          LIST_ARGS+=(--data-urlencode "cursor=${cursor}")
+        fi
+        LIST_RESPONSE="$(slack_api_get conversations.list "${LIST_ARGS[@]}")"
+        require_slack_ok conversations.list "$LIST_RESPONSE"
+        CHANNEL_ID="$(printf '%s\n' "$LIST_RESPONSE" | jq -r --arg name "$CHANNEL" '.channels[] | select(.name == $name) | .id' | head -n1)"
+        [[ -n "$CHANNEL_ID" ]] && break
+        cursor="$(printf '%s\n' "$LIST_RESPONSE" | jq -r '.response_metadata.next_cursor // ""')"
+        [[ -z "$cursor" ]] && break
+      done
+    fi
+    if [[ -z "$CHANNEL_ID" ]]; then
+      echo "Could not resolve Slack channel: ${CHANNEL}" >&2
+      exit 1
+    fi
+
+    E2E_USER_ID="${PRIS_E2E_USER_ID:-}"
+    if [[ -z "$E2E_USER_ID" ]]; then
+      MEMBERS_RESPONSE="$(slack_api_get conversations.members \
+        --data-urlencode "channel=${CHANNEL_ID}" \
+        --data-urlencode "limit=200")"
+      require_slack_ok conversations.members "$MEMBERS_RESPONSE"
+      while read -r candidate_user_id; do
+        [[ -z "$candidate_user_id" ]] && continue
+        USER_RESPONSE="$(slack_api_get users.info --data-urlencode "user=${candidate_user_id}")"
+        require_slack_ok users.info "$USER_RESPONSE"
+        if printf '%s\n' "$USER_RESPONSE" | jq -e '.user.deleted != true and .user.is_bot != true and .user.id != "USLACKBOT"' >/dev/null; then
+          E2E_USER_ID="$candidate_user_id"
+          break
+        fi
+      done < <(printf '%s\n' "$MEMBERS_RESPONSE" | jq -r '.members[]')
+    fi
+    if [[ -z "$E2E_USER_ID" ]]; then
+      echo "Could not resolve a real non-bot Slack user for #${CHANNEL}; set PRIS_E2E_USER_ID=U..." >&2
+      exit 1
+    fi
+
+    NONCE="PRIS_E2E_$(date +%s)"
+    EXPECTED="${NONCE} OK"
+    PARENT_TEXT="${NONCE} parent: Pris runtime E2E in #${CHANNEL}; this thread intentionally seeds a stale suspended sandbox before invoking Pris."
+    POST_RESPONSE="$(slack_api_json chat.postMessage "$(jq -cn --arg channel "$CHANNEL_ID" --arg text "$PARENT_TEXT" '{channel: $channel, text: $text}')")"
+    require_slack_ok chat.postMessage "$POST_RESPONSE"
+    PARENT_TS="$(printf '%s\n' "$POST_RESPONSE" | jq -r '.ts')"
+    THREAD_KEY="slack:${TEAM_ID}:${CHANNEL_ID}:${PARENT_TS}"
+    echo "==> posted E2E parent to #${CHANNEL} (${CHANNEL_ID}) ts=${PARENT_TS}"
+
+    if [[ "${PRIS_E2E_SEED_SUSPENDED:-1}" != "0" ]]; then
+      STALE_SANDBOX_ID="centaur-e2e-stale-$(printf '%s' "$NONCE" | tr '[:upper:]_' '[:lower:]-')"
+      STALE_SANDBOX_ID="${STALE_SANDBOX_ID//_/-}"
+      STALE_SANDBOX_ID="${STALE_SANDBOX_ID:0:63}"
+      echo "==> seeding stale suspended sandbox row for ${THREAD_KEY}"
+      kubectl exec -i -n {{namespace}} "$API_DEPLOY" -- \
+        env THREAD_KEY="$THREAD_KEY" SANDBOX_ID="$STALE_SANDBOX_ID" /app/.venv/bin/python - <<'PY'
+    import asyncio
+    import os
+
+    import asyncpg
+
+
+    async def main() -> None:
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        try:
+            await conn.execute("DELETE FROM sandbox_sessions WHERE thread_key = $1", os.environ["THREAD_KEY"])
+            await conn.execute(
+                """
+                INSERT INTO sandbox_sessions (
+                    thread_key, sandbox_id, harness, engine, state, started_at, updated_at
+                ) VALUES ($1, $2, 'codex', 'codex', 'suspended', NOW(), NOW())
+                """,
+                os.environ["THREAD_KEY"],
+                os.environ["SANDBOX_ID"],
+            )
+        finally:
+            await conn.close()
+
+
+    asyncio.run(main())
+    PY
+    fi
+
+    EVENT_TEXT="<@${BOT_USER_ID}> Reply with exactly ${EXPECTED} and nothing else."
+    EVENT_ID="Ev-pris-e2e-${NONCE}"
+    EVENT_BODY="$(jq -cn \
+      --arg team "$TEAM_ID" \
+      --arg event_id "$EVENT_ID" \
+      --arg user "$E2E_USER_ID" \
+      --arg channel "$CHANNEL_ID" \
+      --arg ts "$PARENT_TS" \
+      --arg text "$EVENT_TEXT" \
+      '{
+        type: "event_callback",
+        team_id: $team,
+        event_id: $event_id,
+        event: {
+          type: "app_mention",
+          user: $user,
+          team: $team,
+          channel: $channel,
+          ts: $ts,
+          event_ts: $ts,
+          text: $text
+        }
+      }')"
+    REQUEST_TS="$(date +%s)"
+    SIGNATURE="$(SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" SLACK_REQUEST_TS="$REQUEST_TS" SLACK_EVENT_BODY="$EVENT_BODY" python3 -c 'import hashlib,hmac,os; base=("v0:%s:%s" % (os.environ["SLACK_REQUEST_TS"], os.environ["SLACK_EVENT_BODY"])).encode(); secret=os.environ["SLACK_SIGNING_SECRET"].encode(); print("v0=" + hmac.new(secret, base, hashlib.sha256).hexdigest())')"
+    echo "==> dispatching signed app_mention to local slackbot for ${THREAD_KEY}"
+    WEBHOOK_RESPONSE="$(printf '%s' "$EVENT_BODY" | kubectl exec -i -n {{namespace}} "$API_DEPLOY" -- \
+      curl -sS -X POST "$SLACKBOT_WEBHOOK_URL" \
+        -H "Content-Type: application/json" \
+        -H "X-Slack-Request-Timestamp: ${REQUEST_TS}" \
+        -H "X-Slack-Signature: ${SIGNATURE}" \
+        --data-binary @-)"
+    if ! printf '%s\n' "$WEBHOOK_RESPONSE" | jq -e '.ok == true' >/dev/null; then
+      echo "Slackbot webhook did not accept event:" >&2
+      printf '%s\n' "$WEBHOOK_RESPONSE" | jq >&2
+      exit 1
+    fi
+
+    echo "==> waiting for Pris reply: ${EXPECTED}"
+    for _ in $(seq 1 120); do
+      REPLIES="$(slack_api_get conversations.replies \
+        --data-urlencode "channel=${CHANNEL_ID}" \
+        --data-urlencode "ts=${PARENT_TS}" \
+        --data-urlencode "limit=100")"
+      require_slack_ok conversations.replies "$REPLIES"
+      FAILURE_TEXT="$(printf '%s\n' "$REPLIES" | jq -r '.messages[] | select(.ts != "'"$PARENT_TS"'") | .text // ""' | grep -F "Failed to start the runtime" || true)"
+      if [[ -n "$FAILURE_TEXT" ]]; then
+        echo "Pris runtime startup failed in #${CHANNEL}:" >&2
+        printf '%s\n' "$FAILURE_TEXT" >&2
+        exit 1
+      fi
+      MATCH_TS="$(printf '%s\n' "$REPLIES" | jq -r --arg expected "$EXPECTED" --arg parent "$PARENT_TS" '.messages[] | select(.ts != $parent) | select((.text // "") | contains($expected)) | .ts' | head -n1)"
+      if [[ -n "$MATCH_TS" ]]; then
+        echo "==> Pris E2E passed in #${CHANNEL}: parent_ts=${PARENT_TS} reply_ts=${MATCH_TS} expected=${EXPECTED}"
+        exit 0
+      fi
+      sleep 2
+    done
+
+    echo "Timed out waiting for Pris reply in #${CHANNEL}. parent_ts=${PARENT_TS} expected=${EXPECTED}" >&2
+    exit 1
+
 dev-pulse-e2e channel="pris-test":
     #!/usr/bin/env bash
     set -euo pipefail

@@ -69,6 +69,32 @@ git tag prod-YYYY-MM-DD-N
 git push origin prod-YYYY-MM-DD-N
 ```
 
+After the deployment controller rolls the target environment, run a real smoke
+test against that deployed environment before declaring the release complete:
+
+```bash
+CENTAUR_NAMESPACE=<deployed-namespace> CENTAUR_RELEASE=centaur just smoke
+```
+
+This is a hard release gate for both `staging` and `prod`. The smoke must run
+after the merge/push and after the rollout, because pre-merge tests do not prove
+the deployed bot can still spawn a runtime and answer. If the smoke fails or the
+operator cannot access the deployed cluster to run it, the release remains
+unverified and must not be reported as healthy.
+
+For any Slackbot, runtime lifecycle, sandbox, final-delivery, or Pris-facing
+change, also run the real Slack E2E in `#pris-test`:
+
+```bash
+CENTAUR_NAMESPACE=<deployed-namespace> CENTAUR_RELEASE=centaur just pris-e2e pris-test
+```
+
+`pris-e2e` posts a parent message to `#pris-test`, sends a signed Slack
+`app_mention` through the deployed Slackbot path, waits for Pris to reply in the
+thread, and fails fast if Slack receives `Failed to start the runtime`. It also
+seeds a stale suspended sandbox row for the synthetic test thread by default, so
+the release explicitly proves stale-runtime recovery works after deployment.
+
 `prod` should only move forward from `staging`, except for emergency hotfixes.
 
 ## Upstream Sync Flow
