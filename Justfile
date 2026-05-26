@@ -234,7 +234,8 @@ visibility:
     if [[ -n "$encoded_key" ]]; then
       api_key="$(printf '%s' "$encoded_key" | base64 --decode 2>/dev/null || printf '%s' "$encoded_key" | base64 -D 2>/dev/null || true)"
     fi
-    ops_url="http://localhost:8000/ops"
+    cache_bust="$(date +%s)"
+    ops_url="http://localhost:8000/ops?visibility=${cache_bust}"
     if [[ -n "$api_key" ]]; then
       ops_url="${ops_url}#api_key=${api_key}"
     fi
@@ -249,6 +250,24 @@ visibility:
     echo "VictoriaLogs:    ${logs_url}"
 
     if command -v open >/dev/null 2>&1; then
+      if command -v osascript >/dev/null 2>&1; then
+        osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+    tell application "Google Chrome"
+      repeat with w in windows
+        set tabsToClose to {}
+        repeat with t in tabs of w
+          set u to URL of t
+          if u contains "localhost:8000/ops" or u contains "localhost:3000" or u contains "localhost:8428" or u contains "localhost:9428" then
+            set end of tabsToClose to t
+          end if
+        end repeat
+        repeat with t in tabsToClose
+          close t
+        end repeat
+      end repeat
+    end tell
+    APPLESCRIPT
+      fi
       open "$ops_url" "$grafana_url" "$metrics_url" "$logs_url"
     fi
 

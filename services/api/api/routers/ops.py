@@ -12,6 +12,7 @@ from api.ops_monitors import build_ops_summary
 router = APIRouter(prefix="/ops", tags=["ops"])
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static" / "ops"
+_NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 
 def _asset(name: str) -> Path:
@@ -21,12 +22,20 @@ def _asset(name: str) -> Path:
 @router.get("", include_in_schema=False)
 @router.get("/", include_in_schema=False)
 async def ops_index() -> FileResponse:
-    return FileResponse(_asset("index.html"), media_type="text/html; charset=utf-8")
+    return FileResponse(
+        _asset("index.html"),
+        media_type="text/html; charset=utf-8",
+        headers=_NO_STORE_HEADERS,
+    )
 
 
 @router.get("/styles.css", include_in_schema=False)
 async def ops_styles() -> FileResponse:
-    return FileResponse(_asset("styles.css"), media_type="text/css; charset=utf-8")
+    return FileResponse(
+        _asset("styles.css"),
+        media_type="text/css; charset=utf-8",
+        headers=_NO_STORE_HEADERS,
+    )
 
 
 @router.get("/app.js", include_in_schema=False)
@@ -34,6 +43,7 @@ async def ops_app_js() -> FileResponse:
     return FileResponse(
         _asset("app.js"),
         media_type="application/javascript; charset=utf-8",
+        headers=_NO_STORE_HEADERS,
     )
 
 
