@@ -18,6 +18,9 @@ slack_tunnel_log := "/tmp/centaur-slack-tunnel.log"
 slack_watch_pid := "/tmp/centaur-slack-watch.pid"
 slack_watch_log := "/tmp/centaur-slack-watch.log"
 slack_watch_session := "centaur-slack-watch"
+pris_dm_watch_pid := "/tmp/centaur-pris-dm-watch.pid"
+pris_dm_watch_log := "/tmp/centaur-pris-dm-watch.log"
+pris_dm_watch_session := "centaur-pris-dm-watch"
 slack_local_port := "3001"
 visibility_ops_pid := "/tmp/centaur-visibility-ops.pid"
 visibility_ops_log := "/tmp/centaur-visibility-ops.log"
@@ -629,6 +632,188 @@ slack-status:
         echo "health: skipped (tunnel process down)"
       fi
     fi
+
+pris-dm-replay-pending:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    API_DEPLOY="deploy/{{release}}-centaur-api"
+    SLACKBOT_WEBHOOK_URL="http://{{release}}-centaur-slackbot:{{slack_local_port}}/api/webhooks/slack"
+
+    decode_secret() {
+      local key="$1"
+      local encoded
+      encoded="$(kubectl -n {{namespace}} get secret centaur-infra-env -o jsonpath="{.data.${key}}" 2>/dev/null || true)"
+      if [[ -z "$encoded" ]]; then
+        echo "centaur-infra-env is missing ${key}" >&2
+        return 1
+      fi
+      printf '%s' "$encoded" | base64 --decode 2>/dev/null || printf '%s' "$encoded" | base64 -D
+    }
+
+    SLACK_BOT_TOKEN="$(decode_secret SLACK_BOT_TOKEN)"
+    SLACK_SIGNING_SECRET="$(decode_secret SLACK_SIGNING_SECRET)"
+
+    slack_api_get() {
+      local method="$1"
+      shift
+      curl -fsS -G "https://slack.com/api/${method}" \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+        "$@"
+    }
+
+    require_slack_ok() {
+      local method="$1"
+      local response="$2"
+      if ! printf '%s\n' "$response" | jq -e '.ok == true' >/dev/null; then
+        echo "Slack ${method} failed:" >&2
+        printf '%s\n' "$response" | jq >&2
+        exit 1
+      fi
+    }
+
+    AUTH_TEST="$(curl -fsS "https://slack.com/api/auth.test" \
+      -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+      -H "Content-Type: application/json; charset=utf-8" \
+      --data '{}')"
+    require_slack_ok auth.test "$AUTH_TEST"
+    TEAM_ID="$(printf '%s\n' "$AUTH_TEST" | jq -r '.team_id')"
+    BOT_USER_ID="$(printf '%s\n' "$AUTH_TEST" | jq -r '.user_id')"
+
+    channels=()
+    if [[ -n "${PRIS_DM_CHANNEL_ID:-}" ]]; then
+      channels+=("$PRIS_DM_CHANNEL_ID")
+    else
+      cursor=""
+      for _ in $(seq 1 20); do
+        args=(--data-urlencode "types=im" --data-urlencode "limit=200")
+        if [[ -n "$cursor" ]]; then
+          args+=(--data-urlencode "cursor=${cursor}")
+        fi
+        response="$(slack_api_get conversations.list "${args[@]}")"
+        require_slack_ok conversations.list "$response"
+        while read -r channel_id; do
+          [[ -n "$channel_id" ]] && channels+=("$channel_id")
+        done < <(printf '%s\n' "$response" | jq -r '.channels[]? | select(.is_im == true) | .id')
+        cursor="$(printf '%s\n' "$response" | jq -r '.response_metadata.next_cursor // ""')"
+        [[ -z "$cursor" ]] && break
+      done
+    fi
+
+    dispatched=0
+    for channel_id in "${channels[@]}"; do
+      info="$(slack_api_get conversations.info --data-urlencode "channel=${channel_id}")"
+      if ! printf '%s\n' "$info" | jq -e '.ok == true' >/dev/null; then
+        echo "skip ${channel_id}: conversations.info failed $(printf '%s\n' "$info" | jq -r '.error // "unknown"')" >&2
+        continue
+      fi
+
+      latest="$(printf '%s\n' "$info" | jq -c '.channel.latest // empty')"
+      [[ -n "$latest" ]] || continue
+
+      type="$(printf '%s\n' "$latest" | jq -r '.type // ""')"
+      subtype="$(printf '%s\n' "$latest" | jq -r '.subtype // ""')"
+      user_id="$(printf '%s\n' "$latest" | jq -r '.user // ""')"
+      bot_id="$(printf '%s\n' "$latest" | jq -r '.bot_id // ""')"
+      message_ts="$(printf '%s\n' "$latest" | jq -r '.ts // ""')"
+      thread_ts="$(printf '%s\n' "$latest" | jq -r '.thread_ts // .ts // ""')"
+      text="$(printf '%s\n' "$latest" | jq -r '.text // ""')"
+
+      [[ "$type" == "message" ]] || continue
+      [[ -z "$subtype" || "$subtype" == "file_share" ]] || continue
+      [[ -n "$user_id" && "$user_id" != "$BOT_USER_ID" ]] || continue
+      [[ -z "$bot_id" ]] || continue
+      [[ -n "$message_ts" && -n "$thread_ts" ]] || continue
+      [[ "$text" == *"<@${BOT_USER_ID}>"* ]] || continue
+
+      replies="$(slack_api_get conversations.replies \
+        --data-urlencode "channel=${channel_id}" \
+        --data-urlencode "ts=${thread_ts}" \
+        --data-urlencode "limit=200")"
+      require_slack_ok conversations.replies "$replies"
+      if printf '%s\n' "$replies" | jq -e --arg bot "$BOT_USER_ID" --arg after "$message_ts" \
+        'any(.messages[]?; ((.ts | tonumber) > ($after | tonumber)) and ((.user // "") == $bot or ((.bot_id // "") != "")))' >/dev/null; then
+        continue
+      fi
+
+      event_id="Ev-pris-dm-poll-${channel_id}-${message_ts//./}"
+      event_body="$(jq -cn \
+        --arg team "$TEAM_ID" \
+        --arg event_id "$event_id" \
+        --arg user "$user_id" \
+        --arg channel "$channel_id" \
+        --arg ts "$message_ts" \
+        --arg thread_ts "$thread_ts" \
+        --arg text "$text" \
+        '{
+          type: "event_callback",
+          team_id: $team,
+          event_id: $event_id,
+          event: {
+            type: "message",
+            user: $user,
+            team: $team,
+            channel: $channel,
+            ts: $ts,
+            event_ts: $ts,
+            thread_ts: $thread_ts,
+            text: $text
+          }
+        }')"
+      request_ts="$(date +%s)"
+      signature="$(SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" SLACK_REQUEST_TS="$request_ts" SLACK_EVENT_BODY="$event_body" python3 -c 'import hashlib,hmac,os; base=("v0:%s:%s" % (os.environ["SLACK_REQUEST_TS"], os.environ["SLACK_EVENT_BODY"])).encode(); secret=os.environ["SLACK_SIGNING_SECRET"].encode(); print("v0=" + hmac.new(secret, base, hashlib.sha256).hexdigest())')"
+
+      echo "==> replaying pending Pris DM ${channel_id}/${message_ts}"
+      webhook_response="$(printf '%s' "$event_body" | kubectl exec -i -n {{namespace}} "$API_DEPLOY" -- \
+        curl -sS -X POST "$SLACKBOT_WEBHOOK_URL" \
+          -H "Content-Type: application/json" \
+          -H "X-Slack-Request-Timestamp: ${request_ts}" \
+          -H "X-Slack-Signature: ${signature}" \
+          --data-binary @-)"
+      if ! printf '%s\n' "$webhook_response" | jq -e '.ok == true' >/dev/null; then
+        echo "Slackbot webhook did not accept replay:" >&2
+        printf '%s\n' "$webhook_response" | jq >&2
+        exit 1
+      fi
+      dispatched=$((dispatched + 1))
+    done
+
+    if [[ "$dispatched" == "0" ]]; then
+      echo "no pending Pris DM mentions without a later bot reply"
+    else
+      echo "replayed ${dispatched} pending Pris DM mention(s)"
+    fi
+
+pris-dm-watch interval="15":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    command -v tmux >/dev/null || { echo "tmux not installed; brew install tmux" >&2; exit 2; }
+    if [[ -f {{pris_dm_watch_pid}} ]] && kill -0 "$(cat {{pris_dm_watch_pid}})" 2>/dev/null; then
+      echo "pris DM watcher already running (pid $(cat {{pris_dm_watch_pid}}))"
+      exit 0
+    fi
+
+    tmux kill-session -t {{pris_dm_watch_session}} 2>/dev/null || true
+    rm -f {{pris_dm_watch_log}}
+    repo="$(pwd)"
+    tmux new-session -d -s {{pris_dm_watch_session}} "
+      cd \"$repo\"
+      while true; do
+        date '+%Y-%m-%d %H:%M:%S pris-dm-watch tick' >>{{pris_dm_watch_log}}
+        just pris-dm-replay-pending >>{{pris_dm_watch_log}} 2>&1 || true
+        sleep {{interval}}
+      done
+    "
+    tmux display-message -p -t {{pris_dm_watch_session}} '#{pane_pid}' > {{pris_dm_watch_pid}}
+    echo "pris DM watcher started (pid $(cat {{pris_dm_watch_pid}}), interval {{interval}}s)"
+
+pris-dm-watch-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmux kill-session -t {{pris_dm_watch_session}} 2>/dev/null || true
+    rm -f {{pris_dm_watch_pid}}
+    echo "pris DM watcher stopped"
 
 cleanup-orphan-proxy-services mode="dry-run":
     #!/usr/bin/env bash
