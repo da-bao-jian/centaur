@@ -643,11 +643,23 @@ slack-watch interval="15":
     tmux kill-session -t {{slack_watch_session}} 2>/dev/null || true
     rm -f {{slack_watch_log}}
     repo="$(pwd)"
+    provider="${SLACK_TUNNEL_PROVIDER:-auto}"
+    if [[ "$provider" == "auto" ]]; then
+      if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+        provider="ngrok"
+      else
+        provider="cloudflared"
+      fi
+    fi
     tmux new-session -d -s {{slack_watch_session}} "
       cd \"$repo\"
       while true; do
         date '+%Y-%m-%d %H:%M:%S slack-watch tick' >>{{slack_watch_log}}
-        SLACK_UP_SKIP_TUNNEL_VERIFY=1 just slack-up >>{{slack_watch_log}} 2>&1 || true
+        if [[ \"${provider}\" == \"ngrok\" ]]; then
+          SLACK_TUNNEL_PROVIDER=\"${provider}\" SLACK_UP_SKIP_TUNNEL_VERIFY=1 just slack-up >>{{slack_watch_log}} 2>&1 || true
+        else
+          SLACK_TUNNEL_PROVIDER=\"${provider}\" just slack-up >>{{slack_watch_log}} 2>&1 || true
+        fi
         sleep {{interval}}
       done
     "

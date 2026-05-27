@@ -11,6 +11,37 @@ afterEach(() => {
 })
 
 describe('Slack event HTTP dedupe', () => {
+  it('returns the raw challenge body for Slack URL verification', async () => {
+    process.env.SLACK_SIGNING_SECRET = 'test-signing-secret'
+    process.env.LINEAR_API_KEY = 'lin-test-key'
+    process.env.SLACK_FEEDBACK_LINEAR_TEAM_ID = 'team-feedback'
+    process.env.SLACK_FEEDBACK_LINEAR_PROJECT_ID = 'project-feedback'
+    delete process.env.SLACK_BOT_TOKEN
+    delete process.env.SLACKBOT_API_KEY
+    delete process.env.CENTAUR_API_KEY
+
+    const originalLog = console.log
+    console.log = mock(() => {}) as typeof console.log
+    try {
+      const { app } = await import('./index')
+      const body = JSON.stringify({
+        type: 'url_verification',
+        challenge: 'centaur-slack-url-verification-ok'
+      })
+
+      const response = await app.request(
+        '/api/webhooks/slack',
+        signedJsonRequest(body, process.env.SLACK_SIGNING_SECRET)
+      )
+
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe('centaur-slack-url-verification-ok')
+      expect(response.headers.get('content-type')).toContain('text/plain')
+    } finally {
+      console.log = originalLog
+    }
+  })
+
   it('creates Linear issues from configured feedback slash commands', async () => {
     process.env.SLACK_SIGNING_SECRET = 'test-signing-secret'
     process.env.LINEAR_API_KEY = 'lin-test-key'

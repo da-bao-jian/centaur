@@ -106,7 +106,12 @@ const slackSignatureMiddleware: MiddlewareHandler<{ Variables: Variables }> = as
 const slackHandler = async (c: Context<{ Variables: Variables }>) => {
   const envelope = parseSlackBody(c.get('slackRawBody'), c.req.header('content-type'))
   if (!envelope) return c.json({ ok: false, error: 'invalid_slack_payload' }, 400)
-  if (envelope.type === 'url_verification') return c.json({ challenge: envelope.challenge })
+  if (envelope.type === 'url_verification') {
+    if (typeof envelope.challenge !== 'string' || envelope.challenge.length === 0) {
+      return c.json({ ok: false, error: 'missing_slack_challenge' }, 400)
+    }
+    return c.text(envelope.challenge)
+  }
 
   const event = envelope.event
   const key = slackDedupKey({
