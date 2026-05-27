@@ -2,7 +2,7 @@ name: Publish Images
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging, prod]
     tags: [v*]
     paths:
       - .github/workflows/publish-images.yml
@@ -28,8 +28,8 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAMESPACE: paradigmxyz/centaur
-  IMAGE_SOURCE: https://github.com/paradigmxyz/centaur
+  IMAGE_NAMESPACE: ${{ github.repository }}
+  IMAGE_SOURCE: https://github.com/${{ github.repository }}
 
 jobs:
   publish:
@@ -53,6 +53,10 @@ jobs:
           - service: iron-proxy
             image: centaur-iron-proxy
             dockerfile: services/iron-proxy/Dockerfile
+            target: ""
+          - service: codex-token-rotator
+            image: centaur-codex-token-rotator
+            dockerfile: services/codex-token-rotator/Dockerfile
             target: ""
 
     steps:
@@ -80,9 +84,9 @@ jobs:
             latest=false
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main,enable={{is_default_branch}}
             type=raw,value=edge,enable={{is_default_branch}}
-            type=sha,prefix=main-sha-,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha,prefix=${{ github.ref_name }}-sha-,enable=${{ github.event_name == 'push' && github.ref_type == 'branch' }}
             type=semver,pattern={{raw}}
             type=ref,event=pr
             type=sha

@@ -172,6 +172,20 @@ centaur-api:prod-<sha>
 
 Keep `latest` as a convenience tag only, not as the source of truth.
 
+For small-host or Mac Mini-style deployments, use the same chart and values but
+pull service images from GHCR instead of relying on local Docker images loaded
+into kind:
+
+```bash
+just source=ghcr image_tag=staging-sha-<short-sha> deploy
+```
+
+By default `source=ghcr` derives the image namespace from `origin`, for example
+`ghcr.io/<owner>/<repo>/centaur-api`. Override it with
+`image_namespace=ghcr.io/<owner>/<repo>` when testing a different registry
+namespace. This only changes image repositories and tags; it should not change
+Centaur workflows, personas, Slack behavior, or the observability stack.
+
 ## Staging E2E Checks
 
 Before promoting visibility or telemetry changes beyond `staging`, verify the

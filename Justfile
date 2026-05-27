@@ -5,6 +5,10 @@ release := env_var_or_default("CENTAUR_RELEASE", "centaur")
 chart := "contrib/chart"
 dev_values := "contrib/chart/values.dev.yaml"
 slack_values := "contrib/chart/values.slack.yaml"
+source := env_var_or_default("CENTAUR_IMAGE_SOURCE", "local")
+image_namespace := env_var_or_default("CENTAUR_IMAGE_NAMESPACE", "auto")
+image_tag := env_var_or_default("CENTAUR_IMAGE_TAG", "latest")
+image_pull_policy := env_var_or_default("CENTAUR_IMAGE_PULL_POLICY", "IfNotPresent")
 slack_pf_pid := "/tmp/centaur-slack-pf.pid"
 slack_pf_log := "/tmp/centaur-slack-pf.log"
 slack_pf_session := "centaur-slack-pf"
@@ -41,7 +45,7 @@ build:
       just _build-all-sequential
     else
       pids=()
-      for recipe in _build-api _build-iron-proxy _build-slackbot _build-agent; do
+      for recipe in _build-api _build-iron-proxy _build-slackbot _build-agent _build-codex-token-rotator; do
         just "$recipe" &
         pids+=("$!")
       done
@@ -60,6 +64,7 @@ _build-all-sequential:
     just _build-iron-proxy
     just _build-slackbot
     just _build-agent
+    just _build-codex-token-rotator
     just _load-local-images
 
 build-one service:
@@ -71,6 +76,7 @@ build-one service:
       iron-proxy) just _build-iron-proxy; image="centaur-iron-proxy:latest" ;;
       slackbot) just _build-slackbot; image="centaur-slackbot:latest" ;;
       agent|sandbox) just _build-agent; image="centaur-agent:latest" ;;
+      codex-token-rotator|token-rotator) just _build-codex-token-rotator; image="centaur-codex-token-rotator:latest" ;;
       *) echo "unknown service: {{service}}" >&2; exit 2 ;;
     esac
     just _kind-load-image "$image"
@@ -87,11 +93,15 @@ _build-slackbot:
 _build-agent:
     docker build --target sandbox -t centaur-agent:latest -f services/sandbox/Dockerfile .
 
+_build-codex-token-rotator:
+    docker build -t centaur-codex-token-rotator:latest -f services/codex-token-rotator/Dockerfile .
+
 _load-local-images:
     just _kind-load-image centaur-api:latest
     just _kind-load-image centaur-iron-proxy:latest
     just _kind-load-image centaur-slackbot:latest
     just _kind-load-image centaur-agent:latest
+    just _kind-load-image centaur-codex-token-rotator:latest
 
 _kind-load-image image:
     #!/usr/bin/env bash
@@ -114,6 +124,43 @@ deploy:
     set -euo pipefail
     helm dependency update {{chart}} >/dev/null
     extra_args=()
+    image_source="{{source}}"
+    if [[ "$image_source" == "ghcr" ]]; then
+      image_namespace="{{image_namespace}}"
+      if [[ "$image_namespace" == "auto" ]]; then
+        origin_url="$(git config --get remote.origin.url || true)"
+        case "$origin_url" in
+          git@github.com:*) repo_slug="${origin_url#git@github.com:}" ;;
+          https://github.com/*) repo_slug="${origin_url#https://github.com/}" ;;
+          http://github.com/*) repo_slug="${origin_url#http://github.com/}" ;;
+          *) repo_slug="paradigmxyz/centaur" ;;
+        esac
+        repo_slug="${repo_slug%.git}"
+        image_namespace="ghcr.io/${repo_slug}"
+      fi
+      image_tag="{{image_tag}}"
+      image_pull_policy="{{image_pull_policy}}"
+      extra_args+=(
+        --set "api.image.repository=${image_namespace}/centaur-api"
+        --set "api.image.tag=${image_tag}"
+        --set "api.image.pullPolicy=${image_pull_policy}"
+        --set "slackbot.image.repository=${image_namespace}/centaur-slackbot"
+        --set "slackbot.image.tag=${image_tag}"
+        --set "slackbot.image.pullPolicy=${image_pull_policy}"
+        --set "sandbox.image.repository=${image_namespace}/centaur-agent"
+        --set "sandbox.image.tag=${image_tag}"
+        --set "sandbox.image.pullPolicy=${image_pull_policy}"
+        --set "ironProxy.image.repository=${image_namespace}/centaur-iron-proxy"
+        --set "ironProxy.image.tag=${image_tag}"
+        --set "ironProxy.image.pullPolicy=${image_pull_policy}"
+        --set "codexTokenRotator.image.repository=${image_namespace}/centaur-codex-token-rotator"
+        --set "codexTokenRotator.image.tag=${image_tag}"
+        --set "codexTokenRotator.image.pullPolicy=${image_pull_policy}"
+      )
+    elif [[ "$image_source" != "local" ]]; then
+      echo "unknown image source: ${image_source} (expected local or ghcr)" >&2
+      exit 2
+    fi
     if [[ -n "${OP_CONNECT_CREDENTIALS_FILE:-}" ]]; then
       extra_args+=(
         --set ironProxy.secretSource=onepassword-connect
@@ -208,14 +255,19 @@ visibility:
     if ! helm status {{release}} -n {{namespace}} >/dev/null 2>&1; then
       just deploy
     fi
-    api_image_tag="${CENTAUR_VISIBILITY_API_IMAGE_TAG:-latest}"
     helm dependency update {{chart}} >/dev/null
-    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace --reuse-values \
-      --set api.image.tag="$api_image_tag" \
-      --set api.image.pullPolicy=IfNotPresent \
+    visibility_args=(
       --set observability.enabled=true \
       --set api.victoriaMetricsPushEnabled=true \
       --set observability.grafana.anonymous.enabled=true
+    )
+    if [[ -n "${CENTAUR_VISIBILITY_API_IMAGE_TAG:-}" ]]; then
+      visibility_args+=(
+        --set "api.image.tag=${CENTAUR_VISIBILITY_API_IMAGE_TAG}"
+        --set api.image.pullPolicy=IfNotPresent
+      )
+    fi
+    helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace --reuse-values "${visibility_args[@]}"
 
     echo "==> waiting for visibility pods"
     kubectl -n {{namespace}} wait --for=condition=ready pod -l app.kubernetes.io/component=victoriametrics --timeout=300s
