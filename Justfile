@@ -9,6 +9,7 @@ source := env_var_or_default("CENTAUR_IMAGE_SOURCE", "local")
 image_namespace := env_var_or_default("CENTAUR_IMAGE_NAMESPACE", "auto")
 image_tag := env_var_or_default("CENTAUR_IMAGE_TAG", "latest")
 image_pull_policy := env_var_or_default("CENTAUR_IMAGE_PULL_POLICY", "IfNotPresent")
+sandbox_ready_timeout_s := env_var_or_default("CENTAUR_SANDBOX_READY_TIMEOUT_S", "180")
 slack_pf_pid := "/tmp/centaur-slack-pf.pid"
 slack_pf_log := "/tmp/centaur-slack-pf.log"
 slack_pf_session := "centaur-slack-pf"
@@ -156,6 +157,7 @@ deploy:
         --set "codexTokenRotator.image.repository=${image_namespace}/centaur-codex-token-rotator"
         --set "codexTokenRotator.image.tag=${image_tag}"
         --set "codexTokenRotator.image.pullPolicy=${image_pull_policy}"
+        --set "api.extraEnv.KUBERNETES_SANDBOX_READY_TIMEOUT_S={{sandbox_ready_timeout_s}}"
       )
     elif [[ "$image_source" != "local" ]]; then
       echo "unknown image source: ${image_source} (expected local or ghcr)" >&2

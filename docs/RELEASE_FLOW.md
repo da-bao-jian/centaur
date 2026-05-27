@@ -185,7 +185,9 @@ By default `source=ghcr` derives the image namespace from `origin`, for example
 `image_namespace=ghcr.io/<owner>/<repo>` when testing a different registry
 namespace. This only changes image repositories and tags; it should not change
 Centaur workflows, personas, Slack behavior, or the observability stack. The
-staging publisher builds Linux arm64 images for Mac Mini/kind nodes.
+staging publisher builds Linux arm64 images for Mac Mini/kind nodes. GHCR
+deploys also set a longer sandbox readiness timeout so first-time image pulls do
+not fail before the agent container is warm.
 
 ## Staging E2E Checks
 
