@@ -165,22 +165,21 @@ def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers()
 
     text = _render_report(inp, window, metrics)
 
-    assert "Report window: 2026-05-28 23:59 -> 2026-05-29 23:59 BJT" in text
-    assert "Window-based sections count items whose relevant timestamp is inside this window." in text
-    assert "Snapshot sections show the current state when the report is generated." in text
-    assert "*Linear cycle completion during report window*" in text
-    assert "Completed non-bug Linear issues in report window: *1 / 4* (25.0%)" in text
-    assert "Window basis: Linear issues whose `completedAt` is inside the report window" in text
-    assert "Denominator: configured daily non-bug target" in text
-    assert "*Linear issues completed in report window (1)*" in text
+    assert "Window: 2026-05-28 23:59 -> 2026-05-29 23:59 BJT" in text
+    assert "Basis: windowed counts use this window; open PRs are current snapshot." in text
+    assert "*Completion rate*" in text
+    assert "Non-bug completed: *1 / 4* (25.0%) in window" in text
+    assert "Target: configured daily non-bug target" in text
+    assert "Cycle: Cycle 12" in text
+    assert "*Linear issues completed (window) (1)*" in text
     assert "<https://linear.app/acme/issue/ENG-1|ENG-1> Ship account settings" in text
-    assert "*Mobius PRs opened in report window (1)*" in text
+    assert "*Mobius PRs opened (window) (1)*" in text
     assert "- <https://github.com/acme/centaur/pull/40|centaur#40> Open fresh PR" in text
     assert "  Author: @charlie" in text
-    assert "*Mobius PRs closed or merged in report window (1)*" in text
+    assert "*Mobius PRs closed/merged (window) (1)*" in text
     assert "- <https://github.com/acme/centaur/pull/41|centaur#41> Close finished PR" in text
     assert "  Author: @dana" in text
-    assert "*Mobius PRs currently open - snapshot, not windowed (3)*" in text
+    assert "*Mobius PRs open (current snapshot) (3)*" in text
     assert "- <https://github.com/acme/centaur/pull/43|centaur#43> Ready without explicit reviewer" in text
     assert "  Status: ready | Open: 0d | Reviewers: none" in text
     assert "- <https://github.com/acme/centaur/pull/42|centaur#42> Add deploy workflow" in text

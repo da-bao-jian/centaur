@@ -663,30 +663,22 @@ def _completion_section(metrics: dict[str, Any]) -> str:
     cycle_names = [name for name in metrics.get("active_cycle_names") or [] if name]
     if target > 0:
         pct = completed / target * 100
-        line = (
-            f"Completed non-bug Linear issues in report window: "
-            f"*{completed} / {target}* ({pct:.1f}%)"
-        )
+        line = f"Non-bug completed: *{completed} / {target}* ({pct:.1f}%) in window"
     else:
-        line = (
-            f"Completed non-bug Linear issues in report window: "
-            f"*{completed}* (target not configured)"
-        )
+        line = f"Non-bug completed: *{completed}* in window (target not configured)"
     if source == "active Linear cycle target":
-        denominator = "Denominator: all non-bug Linear issues currently in active cycle(s)"
+        target_line = "Target: active cycle non-bug issues"
     elif source == "configured daily target":
-        denominator = "Denominator: configured daily non-bug target"
+        target_line = "Target: configured daily non-bug target"
     else:
-        denominator = "Denominator: target not configured"
+        target_line = "Target: not configured"
     lines = [
-        "*Linear cycle completion during report window*",
+        "*Completion rate*",
         line,
-        "Window basis: Linear issues whose `completedAt` is inside the report window",
-        f"Target source: {source}",
-        denominator,
+        target_line,
     ]
     if cycle_names:
-        lines.append(f"Active cycle(s): {', '.join(cycle_names[:3])}")
+        lines.append(f"Cycle: {', '.join(cycle_names[:3])}")
     return "\n".join(lines)
 
 
@@ -699,38 +691,37 @@ def _render_report(inp: Input, window: ReportWindow, metrics: dict[str, Any]) ->
     )
     lines = [
         f"*Dev Pulse EOD - {title_date} (Beijing time)*",
-        f"Report window: {start} -> {end} BJT",
-        "Window-based sections count items whose relevant timestamp is inside this window.",
-        "Snapshot sections show the current state when the report is generated.",
+        f"Window: {start} -> {end} BJT",
+        "Basis: windowed counts use this window; open PRs are current snapshot.",
         "",
         _completion_section(metrics),
         "",
         _render_limited_section(
-            "Linear issues completed in report window",
+            "Linear issues completed (window)",
             metrics.get("issues_closed") or [],
             _issue_line,
         ),
         "",
         _render_limited_section(
-            "Linear issues created in report window",
+            "Linear issues created (window)",
             metrics.get("issues_created") or [],
             _issue_line,
         ),
         "",
         _render_limited_section(
-            "Mobius PRs opened in report window",
+            "Mobius PRs opened (window)",
             metrics.get("prs_opened") or [],
             _pr_line,
         ),
         "",
         _render_limited_section(
-            "Mobius PRs closed or merged in report window",
+            "Mobius PRs closed/merged (window)",
             metrics.get("prs_closed") or [],
             _pr_line,
         ),
         "",
         _render_limited_section(
-            "Mobius PRs currently open - snapshot, not windowed",
+            "Mobius PRs open (current snapshot)",
             metrics.get("outstanding_prs") or [],
             lambda pr: _outstanding_pr_line(
                 pr,
