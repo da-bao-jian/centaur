@@ -184,7 +184,8 @@ By default `source=ghcr` derives the image namespace from `origin`, for example
 `ghcr.io/<owner>/<repo>/centaur-api`. Override it with
 `image_namespace=ghcr.io/<owner>/<repo>` when testing a different registry
 namespace. This only changes image repositories and tags; it should not change
-Centaur workflows, personas, Slack behavior, or the observability stack.
+Centaur workflows, personas, Slack behavior, or the observability stack. The
+staging publisher builds Linux arm64 images for Mac Mini/kind nodes.
 
 ## Staging E2E Checks
 
