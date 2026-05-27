@@ -393,7 +393,7 @@ slack-up:
 
     webhook_healthy() {
       case "$1" in
-        200|400|401|403) return 0 ;;
+        200|400|401) return 0 ;;
         *) return 1 ;;
       esac
     }
@@ -449,11 +449,14 @@ slack-up:
       done
     fi
 
+    skip_tunnel_verify="${SLACK_UP_SKIP_TUNNEL_VERIFY:-0}"
     tunnel_code="000"
-    if [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null; then
+    if [[ "$skip_tunnel_verify" != "1" ]] && [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null; then
       tunnel_code="$(webhook_code "${url}/api/webhooks/slack")"
     fi
-    if [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null && webhook_healthy "$tunnel_code"; then
+    if [[ "$skip_tunnel_verify" == "1" ]] && [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null; then
+      echo "==> tunnel process alive (pid $(cat {{slack_tunnel_pid}}); public probe skipped)"
+    elif [[ -n "$url" ]] && [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null && webhook_healthy "$tunnel_code"; then
       echo "==> tunnel already healthy (pid $(cat {{slack_tunnel_pid}}), HTTP $tunnel_code)"
     else
       if [[ -f {{slack_tunnel_pid}} ]]; then
@@ -498,12 +501,26 @@ slack-up:
     esac
 
     echo "==> verifying tunnel reachability (${url}/api/webhooks/slack)"
-    tunnel_code="$(webhook_code "${url}/api/webhooks/slack")"
-    case "$tunnel_code" in
-      400|401|403|200) echo "    OK (HTTP $tunnel_code)" ;;
+    if [[ "${SLACK_UP_SKIP_TUNNEL_VERIFY:-0}" == "1" ]]; then
+      echo "    skipped (SLACK_UP_SKIP_TUNNEL_VERIFY=1)"
+      tunnel_code="skipped"
+    else
+      tunnel_body="$(mktemp)"
+      tunnel_code="$(curl -s -o "$tunnel_body" -w '%{http_code}' --max-time 5 -X POST "${url}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
+      case "$tunnel_code" in
+        400|401|200) echo "    OK (HTTP $tunnel_code)" ;;
       000) echo "    DNS for ${url#https://} not yet resolvable locally — usually fine, Slack's edge resolves separately. Retry curl in ~30s if you need confirmation." ;;
-      *) echo "    WARNING: tunnel returned HTTP $tunnel_code" >&2 ;;
-    esac
+        *)
+          echo "    ERROR: tunnel returned HTTP $tunnel_code" >&2
+          if grep -q 'ERR_NGROK_727' "$tunnel_body"; then
+            echo "    ngrok account has reached its monthly HTTP request limit" >&2
+          fi
+          rm -f "$tunnel_body"
+          exit 1
+          ;;
+      esac
+      rm -f "$tunnel_body"
+    fi
 
     echo
     echo "Slack webhook URL: ${url}/api/webhooks/slack"
@@ -557,7 +574,7 @@ slack-watch interval="15":
       cd \"$repo\"
       while true; do
         date '+%Y-%m-%d %H:%M:%S slack-watch tick' >>{{slack_watch_log}}
-        just slack-up >>{{slack_watch_log}} 2>&1 || true
+        SLACK_UP_SKIP_TUNNEL_VERIFY=1 just slack-up >>{{slack_watch_log}} 2>&1 || true
         sleep {{interval}}
       done
     "
@@ -600,8 +617,17 @@ slack-status:
     fi
     if [[ -n "$url" ]]; then
       echo "url: ${url}"
-      code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${url}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
-      echo "health: HTTP ${code}"
+      if [[ -f {{slack_tunnel_pid}} ]] && kill -0 "$(cat {{slack_tunnel_pid}})" 2>/dev/null; then
+        body="$(mktemp)"
+        code="$(curl -s -o "$body" -w '%{http_code}' --max-time 5 -X POST "${url}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
+        echo "health: HTTP ${code}"
+        if grep -q 'ERR_NGROK_727' "$body"; then
+          echo "health-detail: ngrok account has reached its monthly HTTP request limit"
+        fi
+        rm -f "$body"
+      else
+        echo "health: skipped (tunnel process down)"
+      fi
     fi
 
 cleanup-orphan-proxy-services mode="dry-run":
