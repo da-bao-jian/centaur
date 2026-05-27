@@ -22,7 +22,7 @@ WORKFLOW_NAME = "dev_pulse_daily"
 BEIJING_TZ = "Asia/Shanghai"
 DEFAULT_SLACK_CHANNEL = "dev-pulse"
 DEFAULT_SLACK_SENDER_NAME = "Pris"
-DEFAULT_GITHUB_REPOS = ("da-bao-jian/centaur",)
+DEFAULT_GITHUB_REPOS = ("lu-bann/mobius",)
 BUG_LABELS = {"bug", "bugs", "defect", "regression"}
 FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 MAX_SECTION_ITEMS = 10
@@ -281,13 +281,13 @@ def _outstanding_pr_line(
     window: ReportWindow,
 ) -> str:
     reviewers = _requested_reviewers(pr)
-    reviewer_text = ", ".join(
-        _reviewer_mention(name, reviewer_mapping) for name in reviewers
-    ) or "reviewer requested"
+    reviewer_text = ", ".join(_reviewer_mention(name, reviewer_mapping) for name in reviewers)
+    review_status = f"{reviewer_text} requested" if reviewer_text else "no reviewer requested"
+    draft_status = "draft" if pr.get("draft") else "ready"
     title = _shorten(str(pr.get("title") or "Untitled PR"), limit=100)
     return (
         f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title} - "
-        f"{reviewer_text} please review. Open {_age_days(pr, window)}d."
+        f"{draft_status}; {review_status}. Open {_age_days(pr, window)}d."
     )
 
 
@@ -632,11 +632,7 @@ async def _collect_github(inp: Input, window: ReportWindow) -> dict[str, Any]:
                 direction="desc",
                 limit=200,
             )
-            outstanding.extend(
-                pr
-                for pr in open_prs
-                if not pr.get("draft") and _requested_reviewers(pr)
-            )
+            outstanding.extend(open_prs)
     finally:
         await client.close()
 
@@ -695,19 +691,19 @@ def _render_report(inp: Input, window: ReportWindow, metrics: dict[str, Any]) ->
         ),
         "",
         _render_limited_section(
-            "PRs opened",
+            "PRs opened since last Dev Pulse",
             metrics.get("prs_opened") or [],
             _pr_line,
         ),
         "",
         _render_limited_section(
-            "PRs closed",
+            "PRs closed since last Dev Pulse",
             metrics.get("prs_closed") or [],
             _pr_line,
         ),
         "",
         _render_limited_section(
-            "Outstanding PRs needing review",
+            "Outstanding open PRs - all currently open",
             metrics.get("outstanding_prs") or [],
             lambda pr: _outstanding_pr_line(
                 pr,

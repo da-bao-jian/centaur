@@ -27,6 +27,7 @@ def test_dev_pulse_schedule_runs_tuesday_to_friday_midnight_beijing() -> None:
     assert dev_pulse_daily.SCHEDULE["timezone"] == "Asia/Shanghai"
     assert dev_pulse_daily.SCHEDULE["slack_channel"] == "dev-pulse"
     assert dev_pulse_daily.SCHEDULE["input"]["slack_sender_name"] == "Pris"
+    assert dev_pulse_daily.DEFAULT_GITHUB_REPOS == ("lu-bann/mobius",)
 
 
 def test_friday_alias_runs_at_2359_beijing() -> None:
@@ -105,9 +106,35 @@ def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers()
             }
         ],
         "issues_created": [],
-        "prs_opened": [],
-        "prs_closed": [],
+        "prs_opened": [
+            {
+                "number": 40,
+                "title": "Open fresh PR",
+                "html_url": "https://github.com/acme/centaur/pull/40",
+                "user": {"login": "charlie"},
+                "base": {"repo": {"full_name": "acme/centaur"}},
+            }
+        ],
+        "prs_closed": [
+            {
+                "number": 41,
+                "title": "Close finished PR",
+                "html_url": "https://github.com/acme/centaur/pull/41",
+                "user": {"login": "dana"},
+                "base": {"repo": {"full_name": "acme/centaur"}},
+            }
+        ],
         "outstanding_prs": [
+            {
+                "number": 43,
+                "title": "Ready without explicit reviewer",
+                "html_url": "https://github.com/acme/centaur/pull/43",
+                "created_at": "2026-05-29T12:00:00Z",
+                "requested_reviewers": [],
+                "requested_teams": [],
+                "user": {"login": "eve"},
+                "base": {"repo": {"full_name": "acme/centaur"}},
+            },
             {
                 "number": 42,
                 "title": "Add deploy workflow",
@@ -117,7 +144,18 @@ def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers()
                 "requested_teams": [{"slug": "infra"}],
                 "user": {"login": "bob"},
                 "base": {"repo": {"full_name": "acme/centaur"}},
-            }
+            },
+            {
+                "number": 39,
+                "title": "Draft integration",
+                "html_url": "https://github.com/acme/centaur/pull/39",
+                "created_at": "2026-05-19T12:00:00Z",
+                "draft": True,
+                "requested_reviewers": [],
+                "requested_teams": [],
+                "user": {"login": "frank"},
+                "base": {"repo": {"full_name": "acme/centaur"}},
+            },
         ],
         "non_bug_completed": 1,
         "completion_target": 4,
@@ -132,9 +170,17 @@ def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers()
     assert "Non-bug issues completed: *1 / 4* (25.0%)" in text
     assert "*Issues closed (1)*" in text
     assert "<https://linear.app/acme/issue/ENG-1|ENG-1> Ship account settings" in text
-    assert "*Outstanding PRs needing review (1)*" in text
+    assert "*PRs opened since last Dev Pulse (1)*" in text
+    assert "<https://github.com/acme/centaur/pull/40|centaur#40> Open fresh PR" in text
+    assert "*PRs closed since last Dev Pulse (1)*" in text
+    assert "<https://github.com/acme/centaur/pull/41|centaur#41> Close finished PR" in text
+    assert "*Outstanding open PRs - all currently open (3)*" in text
+    assert "<https://github.com/acme/centaur/pull/43|centaur#43> Ready without explicit reviewer" in text
+    assert "ready; no reviewer requested" in text
     assert "<https://github.com/acme/centaur/pull/42|centaur#42> Add deploy workflow" in text
-    assert "<@U123>, <!subteam^S123|infra> please review" in text
+    assert "ready; <@U123>, <!subteam^S123|infra> requested" in text
+    assert "<https://github.com/acme/centaur/pull/39|centaur#39> Draft integration" in text
+    assert "draft; no reviewer requested" in text
 
 
 class _FakeWorkflowContext:
