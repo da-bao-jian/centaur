@@ -268,9 +268,11 @@ def _pr_line(pr: dict[str, Any]) -> str:
     author = pr.get("user")
     author_login = author.get("login") if isinstance(author, dict) else ""
     title = _shorten(str(pr.get("title") or "Untitled PR"))
-    return (
-        f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title} "
-        f"- {_github_user(str(author_login or 'unknown'))}"
+    return "\n".join(
+        [
+            f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title}",
+            f"  Author: {_github_user(str(author_login or 'unknown'))}",
+        ]
     )
 
 
@@ -282,12 +284,17 @@ def _outstanding_pr_line(
 ) -> str:
     reviewers = _requested_reviewers(pr)
     reviewer_text = ", ".join(_reviewer_mention(name, reviewer_mapping) for name in reviewers)
-    review_status = f"{reviewer_text} requested" if reviewer_text else "no reviewer requested"
+    reviewer_status = reviewer_text or "none"
     draft_status = "draft" if pr.get("draft") else "ready"
     title = _shorten(str(pr.get("title") or "Untitled PR"), limit=100)
-    return (
-        f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title} - "
-        f"{draft_status}; {review_status}. Open {_age_days(pr, window)}d."
+    return "\n".join(
+        [
+            f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title}",
+            (
+                f"  Status: {draft_status} | Open: {_age_days(pr, window)}d | "
+                f"Reviewers: {reviewer_status}"
+            ),
+        ]
     )
 
 

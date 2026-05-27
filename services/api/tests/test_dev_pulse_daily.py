@@ -171,16 +171,18 @@ def test_render_report_keeps_outstanding_prs_unwindowed_and_mentions_reviewers()
     assert "*Issues closed (1)*" in text
     assert "<https://linear.app/acme/issue/ENG-1|ENG-1> Ship account settings" in text
     assert "*PRs opened since last Dev Pulse (1)*" in text
-    assert "<https://github.com/acme/centaur/pull/40|centaur#40> Open fresh PR" in text
+    assert "- <https://github.com/acme/centaur/pull/40|centaur#40> Open fresh PR" in text
+    assert "  Author: @charlie" in text
     assert "*PRs closed since last Dev Pulse (1)*" in text
-    assert "<https://github.com/acme/centaur/pull/41|centaur#41> Close finished PR" in text
+    assert "- <https://github.com/acme/centaur/pull/41|centaur#41> Close finished PR" in text
+    assert "  Author: @dana" in text
     assert "*Outstanding open PRs - all currently open (3)*" in text
-    assert "<https://github.com/acme/centaur/pull/43|centaur#43> Ready without explicit reviewer" in text
-    assert "ready; no reviewer requested" in text
-    assert "<https://github.com/acme/centaur/pull/42|centaur#42> Add deploy workflow" in text
-    assert "ready; <@U123>, <!subteam^S123|infra> requested" in text
-    assert "<https://github.com/acme/centaur/pull/39|centaur#39> Draft integration" in text
-    assert "draft; no reviewer requested" in text
+    assert "- <https://github.com/acme/centaur/pull/43|centaur#43> Ready without explicit reviewer" in text
+    assert "  Status: ready | Open: 0d | Reviewers: none" in text
+    assert "- <https://github.com/acme/centaur/pull/42|centaur#42> Add deploy workflow" in text
+    assert "  Status: ready | Open: 9d | Reviewers: <@U123>, <!subteam^S123|infra>" in text
+    assert "- <https://github.com/acme/centaur/pull/39|centaur#39> Draft integration" in text
+    assert "  Status: draft | Open: 10d | Reviewers: none" in text
 
 
 class _FakeWorkflowContext:
