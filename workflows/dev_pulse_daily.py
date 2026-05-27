@@ -663,12 +663,30 @@ def _completion_section(metrics: dict[str, Any]) -> str:
     cycle_names = [name for name in metrics.get("active_cycle_names") or [] if name]
     if target > 0:
         pct = completed / target * 100
-        line = f"Non-bug issues completed: *{completed} / {target}* ({pct:.1f}%)"
+        line = (
+            f"Completed non-bug Linear issues in report window: "
+            f"*{completed} / {target}* ({pct:.1f}%)"
+        )
     else:
-        line = f"Non-bug issues completed: *{completed}* (target not configured)"
-    lines = ["*Completion rate*", line, f"Target source: {source}"]
+        line = (
+            f"Completed non-bug Linear issues in report window: "
+            f"*{completed}* (target not configured)"
+        )
+    if source == "active Linear cycle target":
+        denominator = "Denominator: all non-bug Linear issues currently in active cycle(s)"
+    elif source == "configured daily target":
+        denominator = "Denominator: configured daily non-bug target"
+    else:
+        denominator = "Denominator: target not configured"
+    lines = [
+        "*Linear cycle completion during report window*",
+        line,
+        "Window basis: Linear issues whose `completedAt` is inside the report window",
+        f"Target source: {source}",
+        denominator,
+    ]
     if cycle_names:
-        lines.append(f"Active cycle: {', '.join(cycle_names[:3])}")
+        lines.append(f"Active cycle(s): {', '.join(cycle_names[:3])}")
     return "\n".join(lines)
 
 
@@ -681,36 +699,38 @@ def _render_report(inp: Input, window: ReportWindow, metrics: dict[str, Any]) ->
     )
     lines = [
         f"*Dev Pulse EOD - {title_date} (Beijing time)*",
-        f"Window: {start} -> {end} BJT",
+        f"Report window: {start} -> {end} BJT",
+        "Window-based sections count items whose relevant timestamp is inside this window.",
+        "Snapshot sections show the current state when the report is generated.",
         "",
         _completion_section(metrics),
         "",
         _render_limited_section(
-            "Issues closed",
+            "Linear issues completed in report window",
             metrics.get("issues_closed") or [],
             _issue_line,
         ),
         "",
         _render_limited_section(
-            "Issues created",
+            "Linear issues created in report window",
             metrics.get("issues_created") or [],
             _issue_line,
         ),
         "",
         _render_limited_section(
-            "PRs opened since last Dev Pulse",
+            "Mobius PRs opened in report window",
             metrics.get("prs_opened") or [],
             _pr_line,
         ),
         "",
         _render_limited_section(
-            "PRs closed since last Dev Pulse",
+            "Mobius PRs closed or merged in report window",
             metrics.get("prs_closed") or [],
             _pr_line,
         ),
         "",
         _render_limited_section(
-            "Outstanding open PRs - all currently open",
+            "Mobius PRs currently open - snapshot, not windowed",
             metrics.get("outstanding_prs") or [],
             lambda pr: _outstanding_pr_line(
                 pr,
