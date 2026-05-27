@@ -15,6 +15,7 @@ slack_pf_log := "/tmp/centaur-slack-pf.log"
 slack_pf_session := "centaur-slack-pf"
 slack_tunnel_pid := "/tmp/centaur-slack-tunnel.pid"
 slack_tunnel_log := "/tmp/centaur-slack-tunnel.log"
+slack_tunnel_session := "centaur-slack-tunnel"
 slack_watch_pid := "/tmp/centaur-slack-watch.pid"
 slack_watch_log := "/tmp/centaur-slack-watch.log"
 slack_watch_session := "centaur-slack-watch"
@@ -388,10 +389,28 @@ slack-up:
 
     deploy="{{release}}-centaur-slackbot"
     svc="{{release}}-centaur-slackbot"
+    provider="${SLACK_TUNNEL_PROVIDER:-auto}"
+    if [[ "$provider" == "auto" ]]; then
+      if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+        provider="ngrok"
+      else
+        provider="cloudflared"
+      fi
+    fi
+    case "$provider" in
+      ngrok|cloudflared|localtunnel|localhostrun) ;;
+      *) echo "unknown SLACK_TUNNEL_PROVIDER=${provider} (expected auto, ngrok, cloudflared, localtunnel, or localhostrun)" >&2; exit 2 ;;
+    esac
 
     webhook_code() {
       curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "$1" \
         -H 'Content-Type: application/json' -d '{}' || true
+    }
+
+    tunnel_url_from_log() {
+      if [[ -f {{slack_tunnel_log}} ]]; then
+        grep -oE 'https://[a-z0-9.-]+\.(ngrok-free\.dev|trycloudflare\.com|loca\.lt|lhr\.life)' {{slack_tunnel_log}} | tail -n1 || true
+      fi
     }
 
     webhook_healthy() {
@@ -442,11 +461,11 @@ slack-up:
     fi
 
     url=""
-    if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+    if [[ "$provider" == "ngrok" && -n "${NGROK_DOMAIN:-}" ]]; then
       url="https://${NGROK_DOMAIN}"
     elif [[ -f {{slack_tunnel_log}} ]]; then
       for _ in $(seq 1 15); do
-        url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' {{slack_tunnel_log}} | head -n1 || true)"
+        url="$(tunnel_url_from_log)"
         [[ -n "$url" ]] && break
         sleep 1
       done
@@ -468,12 +487,54 @@ slack-up:
         kill "$pid" 2>/dev/null || true
       fi
       rm -f {{slack_tunnel_pid}} {{slack_tunnel_log}}
-      if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+      if [[ "$provider" == "ngrok" ]]; then
+        if [[ -z "${NGROK_DOMAIN:-}" ]]; then
+          echo "NGROK_DOMAIN is required when SLACK_TUNNEL_PROVIDER=ngrok" >&2
+          exit 2
+        fi
         command -v ngrok >/dev/null || { echo "ngrok not installed; brew install ngrok or unset NGROK_DOMAIN" >&2; exit 2; }
         echo "==> starting ngrok tunnel on ${NGROK_DOMAIN}"
         ngrok http --domain "${NGROK_DOMAIN}" http://127.0.0.1:{{slack_local_port}} --log stdout --log-format logfmt >{{slack_tunnel_log}} 2>&1 &
         echo $! > {{slack_tunnel_pid}}
         url="https://${NGROK_DOMAIN}"
+      elif [[ "$provider" == "localtunnel" ]]; then
+        command -v tmux >/dev/null || { echo "tmux not installed; brew install tmux" >&2; exit 2; }
+        command -v npx >/dev/null || { echo "npx not installed; install Node.js/npm or choose another tunnel provider" >&2; exit 2; }
+        lt_args=(npx --yes localtunnel --port {{slack_local_port}} --local-host 127.0.0.1)
+        if [[ -n "${LOCALTUNNEL_SUBDOMAIN:-}" ]]; then
+          lt_args+=(--subdomain "${LOCALTUNNEL_SUBDOMAIN}")
+          echo "==> starting localtunnel on ${LOCALTUNNEL_SUBDOMAIN}.loca.lt"
+        else
+          echo "==> starting localtunnel quick tunnel"
+        fi
+        tmux kill-session -t {{slack_tunnel_session}} 2>/dev/null || true
+        tmux new-session -d -s {{slack_tunnel_session}} "
+          cd \"$(pwd)\"
+          exec ${lt_args[*]} >{{slack_tunnel_log}} 2>&1
+        "
+        tmux display-message -p -t {{slack_tunnel_session}} '#{pane_pid}' > {{slack_tunnel_pid}}
+        url=""
+        for _ in $(seq 1 20); do
+          url="$(tunnel_url_from_log)"
+          [[ -n "$url" ]] && break
+          sleep 1
+        done
+      elif [[ "$provider" == "localhostrun" ]]; then
+        command -v tmux >/dev/null || { echo "tmux not installed; brew install tmux" >&2; exit 2; }
+        command -v ssh >/dev/null || { echo "ssh not installed; choose another tunnel provider" >&2; exit 2; }
+        echo "==> starting localhost.run tunnel"
+        tmux kill-session -t {{slack_tunnel_session}} 2>/dev/null || true
+        tmux new-session -d -s {{slack_tunnel_session}} "
+          cd \"$(pwd)\"
+          exec ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=5 -R 80:localhost:{{slack_local_port}} nokey@localhost.run >{{slack_tunnel_log}} 2>&1
+        "
+        tmux display-message -p -t {{slack_tunnel_session}} '#{pane_pid}' > {{slack_tunnel_pid}}
+        url=""
+        for _ in $(seq 1 20); do
+          url="$(tunnel_url_from_log)"
+          [[ -n "$url" ]] && break
+          sleep 1
+        done
       else
         command -v cloudflared >/dev/null || { echo "cloudflared not installed; brew install cloudflared or set NGROK_DOMAIN" >&2; exit 2; }
         echo "==> starting cloudflared quick tunnel (URL changes on every restart)"
@@ -481,7 +542,7 @@ slack-up:
         echo $! > {{slack_tunnel_pid}}
         url=""
         for _ in $(seq 1 15); do
-          url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' {{slack_tunnel_log}} | head -n1 || true)"
+          url="$(tunnel_url_from_log)"
           [[ -n "$url" ]] && break
           sleep 1
         done
@@ -512,7 +573,15 @@ slack-up:
       tunnel_code="$(curl -s -o "$tunnel_body" -w '%{http_code}' --max-time 5 -X POST "${url}/api/webhooks/slack" -H 'Content-Type: application/json' -d '{}' || true)"
       case "$tunnel_code" in
         400|401|200) echo "    OK (HTTP $tunnel_code)" ;;
-      000) echo "    DNS for ${url#https://} not yet resolvable locally — usually fine, Slack's edge resolves separately. Retry curl in ~30s if you need confirmation." ;;
+        000)
+          if [[ "$provider" == "cloudflared" ]]; then
+            echo "    DNS for ${url#https://} not yet resolvable locally — usually fine, Slack's edge resolves separately. Retry curl in ~30s if you need confirmation."
+          else
+            echo "    ERROR: tunnel did not respond" >&2
+            rm -f "$tunnel_body"
+            exit 1
+          fi
+          ;;
         *)
           echo "    ERROR: tunnel returned HTTP $tunnel_code" >&2
           if grep -q 'ERR_NGROK_727' "$tunnel_body"; then
@@ -548,6 +617,7 @@ slack-down:
         rm -f "$pidfile"
       fi
     done
+    tmux kill-session -t {{slack_tunnel_session}} 2>/dev/null || true
     tmux kill-session -t {{slack_pf_session}} 2>/dev/null || true
     rm -f {{slack_pf_log}} {{slack_tunnel_log}}
 
@@ -613,10 +683,11 @@ slack-status:
     done
 
     url=""
-    if [[ -n "${NGROK_DOMAIN:-}" ]]; then
+    if [[ -f {{slack_tunnel_log}} ]]; then
+      url="$(grep -oE 'https://[a-z0-9.-]+\.(ngrok-free\.dev|trycloudflare\.com|loca\.lt|lhr\.life)' {{slack_tunnel_log}} | tail -n1 || true)"
+    fi
+    if [[ -z "$url" && -n "${NGROK_DOMAIN:-}" ]]; then
       url="https://${NGROK_DOMAIN}"
-    elif [[ -f {{slack_tunnel_log}} ]]; then
-      url="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' {{slack_tunnel_log}} | head -n1 || true)"
     fi
     if [[ -n "$url" ]]; then
       echo "url: ${url}"
