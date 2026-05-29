@@ -22,21 +22,13 @@ from workflows.dev_pulse_daily import (
     _age_days,
     _csv_env,
     _env_flag_enabled,
-    _github_user,
     _int_env,
     _is_bug_issue,
-    _issue_line,
     _iso,
     _json_dict_env,
     _parse_date,
     _parse_datetime,
     _parse_now,
-    _pr_label,
-    _requested_reviewers,
-    _reviewer_mention,
-    _render_limited_section,
-    _shorten,
-    _slack_link,
     _within_window,
 )
 
@@ -50,7 +42,6 @@ DEFAULT_WEEKLY_SLACK_CHANNEL = os.getenv(
     "DEV_VELOCITY_WEEKLY_SLACK_CHANNEL",
     os.getenv("DEV_PULSE_SLACK_CHANNEL", DEFAULT_SLACK_CHANNEL),
 )
-MAX_WEEKLY_SECTION_ITEMS = 12
 STALE_PR_DAYS = 7
 
 
@@ -203,52 +194,6 @@ def _average_merge_seconds(prs: list[dict[str, Any]]) -> int | None:
     if not durations:
         return None
     return int(sum(durations) / len(durations))
-
-
-def _merged_pr_line(pr: dict[str, Any]) -> str:
-    author = pr.get("user")
-    author_login = author.get("login") if isinstance(author, dict) else ""
-    title = _shorten(str(pr.get("title") or "Untitled PR"))
-    merge_time = _format_duration(_duration_seconds(pr))
-    author_text = _github_user(str(author_login or "unknown"))
-    return "\n".join(
-        [
-            f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title}",
-            f"  Merge time: {merge_time} | Author: {author_text}",
-        ]
-    )
-
-
-def _opened_pr_line(pr: dict[str, Any]) -> str:
-    author = pr.get("user")
-    author_login = author.get("login") if isinstance(author, dict) else ""
-    title = _shorten(str(pr.get("title") or "Untitled PR"))
-    return "\n".join(
-        [
-            f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title}",
-            f"  Author: {_github_user(str(author_login or 'unknown'))}",
-        ]
-    )
-
-
-def _open_pr_line(
-    pr: dict[str, Any],
-    *,
-    reviewer_mapping: dict[str, str],
-    window: ReportWindow,
-) -> str:
-    reviewers = _requested_reviewers(pr)
-    reviewer_text = ", ".join(_reviewer_mention(name, reviewer_mapping) for name in reviewers)
-    title = _shorten(str(pr.get("title") or "Untitled PR"), limit=100)
-    return "\n".join(
-        [
-            f"- {_slack_link(pr.get('html_url'), _pr_label(pr))} {title}",
-            (
-                f"  Status: {'draft' if pr.get('draft') else 'ready'} | "
-                f"Open: {_age_days(pr, window)}d | Reviewers: {reviewer_text or 'none'}"
-            ),
-        ]
-    )
 
 
 def _cycle_name(cycle: dict[str, Any]) -> str:
@@ -517,7 +462,7 @@ def _scorecard(metrics: dict[str, Any], window: ReportWindow) -> str:
     )
 
 
-def _render_report(inp: Input, window: ReportWindow, metrics: dict[str, Any]) -> str:
+def _render_report(_inp: Input, window: ReportWindow, metrics: dict[str, Any]) -> str:
     start = window.start_local.strftime("%Y-%m-%d %H:%M")
     end = window.end_local.strftime("%Y-%m-%d %H:%M")
     title_date = (
@@ -536,55 +481,6 @@ def _render_report(inp: Input, window: ReportWindow, metrics: dict[str, Any]) ->
         cycle_line,
         "",
         _scorecard(metrics, window),
-        "",
-        _render_limited_section(
-            "Linear issues closed this week",
-            metrics.get("issues_closed") or [],
-            _issue_line,
-            limit=MAX_WEEKLY_SECTION_ITEMS,
-        ),
-        "",
-        _render_limited_section(
-            "Open parent issues created this cycle",
-            metrics.get("parent_created_open") or [],
-            _issue_line,
-            empty="None.",
-            limit=MAX_WEEKLY_SECTION_ITEMS,
-        ),
-        "",
-        _render_limited_section(
-            "Open bugs in active cycle",
-            metrics.get("open_bugs") or [],
-            _issue_line,
-            empty="None.",
-            limit=MAX_WEEKLY_SECTION_ITEMS,
-        ),
-        "",
-        _render_limited_section(
-            "Mobius PRs merged this week",
-            metrics.get("prs_merged") or [],
-            _merged_pr_line,
-            limit=MAX_WEEKLY_SECTION_ITEMS,
-        ),
-        "",
-        _render_limited_section(
-            "Mobius PRs opened this week",
-            metrics.get("prs_opened") or [],
-            _opened_pr_line,
-            limit=MAX_WEEKLY_SECTION_ITEMS,
-        ),
-        "",
-        _render_limited_section(
-            "Mobius PRs open now",
-            metrics.get("outstanding_prs") or [],
-            lambda pr: _open_pr_line(
-                pr,
-                reviewer_mapping=inp.reviewer_slack_mentions,
-                window=window,
-            ),
-            empty="None.",
-            limit=MAX_OUTSTANDING_PRS,
-        ),
     ]
     return "\n".join(lines).strip()
 

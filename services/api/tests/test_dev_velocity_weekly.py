@@ -161,7 +161,7 @@ def test_format_duration_keeps_pr_merge_time_compact() -> None:
     assert _format_duration(None) == "n/a"
 
 
-def test_render_weekly_report_is_readable_and_embeds_links() -> None:
+def test_render_weekly_report_keeps_only_scorecard() -> None:
     inp = Input(
         now="2026-05-29T23:50:00+08:00",
         reviewer_slack_mentions={"alice": "<@U123>"},
@@ -246,15 +246,14 @@ def test_render_weekly_report_is_readable_and_embeds_links() -> None:
         in text
     )
     assert "- Open PR backlog: *1* ready, *1* draft, *1* stale >= 7d" in text
-    assert "<https://linear.app/luban/issue/MOB-1|MOB-1> Ship parent feature" in text
-    assert "*Open parent issues created this cycle (1)*" in text
-    assert "<https://linear.app/luban/issue/MOB-2|MOB-2> Finish parent feature" in text
-    assert "*Open bugs in active cycle (1)*" in text
-    assert "<https://linear.app/luban/issue/MOB-4|MOB-4> Fix webhook retry" in text
-    assert "<https://github.com/lu-bann/mobius/pull/581|mobius#581> feat(storage)" in text
-    assert "Merge time: 1d | Author: @chuwt" in text
-    assert "<https://github.com/lu-bann/mobius/pull/582|mobius#582> feat(contract)" in text
-    assert "Reviewers: <@U123>" in text
+    assert "Linear issues closed this week" not in text
+    assert "Open parent issues created this cycle" not in text
+    assert "Open bugs in active cycle" not in text
+    assert "Mobius PRs merged this week" not in text
+    assert "Mobius PRs opened this week" not in text
+    assert "Mobius PRs open now" not in text
+    assert "MOB-1" not in text
+    assert "mobius#581" not in text
 
 
 class _FakeWorkflowContext:
