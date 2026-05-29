@@ -46,23 +46,25 @@ def _issue(
     }
 
 
-def test_weekly_velocity_schedule_runs_friday_before_daily_eod_beijing() -> None:
+def test_weekly_velocity_schedule_runs_sunday_2359_beijing() -> None:
     assert dev_velocity_weekly.WORKFLOW_NAME == "dev_velocity_weekly"
-    assert dev_velocity_weekly.SCHEDULE["cron"] == "50 23 * * 5"
+    assert dev_velocity_weekly.SCHEDULE["schedule_id"] == "dev_velocity_weekly_sunday_bjt"
+    assert dev_velocity_weekly.SCHEDULE["cron"] == "59 23 * * 0"
     assert dev_velocity_weekly.SCHEDULE["timezone"] == "Asia/Shanghai"
     assert dev_velocity_weekly.SCHEDULE["input"]["slack_sender_name"] == "Pris"
     assert dev_velocity_weekly.SCHEDULE["input"]["lookback_hours"] == 168
+    assert dev_velocity_weekly.SCHEDULE["input"]["schedule_label"] == "sunday_2359_bjt"
 
 
 def test_weekly_report_window_defaults_to_previous_168_hours() -> None:
-    inp = Input(now="2026-05-29T23:50:00+08:00")
+    inp = Input(now="2026-05-31T23:59:00+08:00")
 
     window = _report_window(inp)
 
-    assert window.end == dt.datetime(2026, 5, 29, 15, 50, tzinfo=dt.timezone.utc)
-    assert window.start == dt.datetime(2026, 5, 22, 15, 50, tzinfo=dt.timezone.utc)
-    assert window.start_local.strftime("%Y-%m-%d %H:%M") == "2026-05-22 23:50"
-    assert window.end_local.strftime("%Y-%m-%d %H:%M") == "2026-05-29 23:50"
+    assert window.end == dt.datetime(2026, 5, 31, 15, 59, tzinfo=dt.timezone.utc)
+    assert window.start == dt.datetime(2026, 5, 24, 15, 59, tzinfo=dt.timezone.utc)
+    assert window.start_local.strftime("%Y-%m-%d %H:%M") == "2026-05-24 23:59"
+    assert window.end_local.strftime("%Y-%m-%d %H:%M") == "2026-05-31 23:59"
 
 
 def test_active_cycle_rows_keep_created_parent_and_cycle_metadata() -> None:
@@ -163,12 +165,12 @@ def test_format_duration_keeps_pr_merge_time_compact() -> None:
 
 def test_render_weekly_report_keeps_only_scorecard() -> None:
     inp = Input(
-        now="2026-05-29T23:50:00+08:00",
+        now="2026-05-31T23:59:00+08:00",
         reviewer_slack_mentions={"alice": "<@U123>"},
     )
     window = ReportWindow(
-        start=dt.datetime(2026, 5, 22, 15, 50, tzinfo=dt.timezone.utc),
-        end=dt.datetime(2026, 5, 29, 15, 50, tzinfo=dt.timezone.utc),
+        start=dt.datetime(2026, 5, 24, 15, 59, tzinfo=dt.timezone.utc),
+        end=dt.datetime(2026, 5, 31, 15, 59, tzinfo=dt.timezone.utc),
         timezone="Asia/Shanghai",
     )
     closed_parent = _issue("MOB-1", "Ship parent feature", completed=True)
@@ -232,8 +234,8 @@ def test_render_weekly_report_keeps_only_scorecard() -> None:
 
     text = _render_report(inp, window, metrics)
 
-    assert "*Weekly Dev Velocity - Fri May 29 (Beijing time)*" in text
-    assert "Window: 2026-05-22 23:50 -> 2026-05-29 23:50 BJT" in text
+    assert "*Weekly Dev Velocity - Sun May 31 (Beijing time)*" in text
+    assert "Window: 2026-05-24 23:59 -> 2026-05-31 23:59 BJT" in text
     assert "Basis: week = window; cycle % = current Linear cycle." in text
     assert "Active cycle: Cycle 11" in text
     assert "- Parent issues created this cycle closed: *1 / 2* (50.0%)" in text
@@ -299,7 +301,7 @@ async def test_handler_posts_weekly_velocity_as_pris(monkeypatch: pytest.MonkeyP
     ctx = _FakeWorkflowContext()
 
     await handler(  # type: ignore[arg-type]
-        Input(slack_channel="pris-test", now="2026-05-29T23:50:00+08:00"),
+        Input(slack_channel="pris-test", now="2026-05-31T23:59:00+08:00"),
         ctx,
     )
 

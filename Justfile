@@ -1353,7 +1353,7 @@ dev-velocity-weekly-e2e channel="pris-test":
       echo "DEV_VELOCITY_WEEKLY_E2E_LOOKBACK_HOURS must be a positive integer" >&2
       exit 2
     fi
-    DEFAULT_NOW="$(python3 -c 'import datetime as dt; from zoneinfo import ZoneInfo; tz = ZoneInfo("Asia/Shanghai"); now = dt.datetime.now(tz); days = (now.weekday() - 4) % 7; friday = (now - dt.timedelta(days=days)).replace(hour=23, minute=50, second=0, microsecond=0); friday = friday - dt.timedelta(days=7) if friday > now else friday; print(friday.isoformat())')"
+    DEFAULT_NOW="$(python3 -c 'import datetime as dt; from zoneinfo import ZoneInfo; tz = ZoneInfo("Asia/Shanghai"); now = dt.datetime.now(tz); days = (6 - now.weekday()) % 7; sunday = (now + dt.timedelta(days=days)).replace(hour=23, minute=59, second=0, microsecond=0); sunday = sunday + dt.timedelta(days=7) if sunday <= now else sunday; print(sunday.isoformat())')"
     REPORT_NOW="${DEV_VELOCITY_WEEKLY_E2E_NOW:-$DEFAULT_NOW}"
 
     encoded_key="$(kubectl -n {{namespace}} get secret centaur-infra-env -o jsonpath='{.data.SLACKBOT_API_KEY}' 2>/dev/null || true)"

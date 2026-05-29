@@ -72,8 +72,8 @@ def _weekly_reviewer_mentions() -> dict[str, str]:
 
 
 SCHEDULE = {
-    "schedule_id": "dev_velocity_weekly_friday_bjt",
-    "cron": "50 23 * * 5",
+    "schedule_id": "dev_velocity_weekly_sunday_bjt",
+    "cron": "59 23 * * 0",
     "timezone": BEIJING_TZ,
     "slack_channel": DEFAULT_WEEKLY_SLACK_CHANNEL,
     "enabled": _weekly_enabled(),
@@ -88,7 +88,7 @@ SCHEDULE = {
             "DEV_VELOCITY_WEEKLY_LOOKBACK_HOURS",
             DEFAULT_WEEKLY_LOOKBACK_HOURS,
         ),
-        "schedule_label": "friday_2350_bjt",
+        "schedule_label": "sunday_2359_bjt",
     },
 }
 
