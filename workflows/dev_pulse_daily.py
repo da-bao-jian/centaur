@@ -425,6 +425,7 @@ class LinearPulseClient:
               creator { id name }
               team { id name key }
               cycle { id name number }
+              parent { id identifier }
               labels { nodes { id name } }
             }
             pageInfo { hasNextPage endCursor }
