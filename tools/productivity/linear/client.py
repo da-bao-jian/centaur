@@ -1,60 +1,34 @@
-"""Linear GraphQL API client."""
+"""Linear GraphQL API client for the Linear tool."""
 
+from __future__ import annotations
+
+import sys
+from pathlib import Path
 from typing import Any
 
-import httpx
+try:
+    from api.integrations.linear import LinearReadonlyClient
+except ModuleNotFoundError:
+    api_src = Path(__file__).resolve().parents[3] / "services" / "api"
+    if api_src.exists():
+        sys.path.insert(0, str(api_src))
+    from api.integrations.linear import LinearReadonlyClient
 
-from centaur_sdk import secret
 
-GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
+class LinearClient(LinearReadonlyClient):
+    """Tool-facing Linear client.
 
-
-class LinearClient:
-    """Client for Linear's GraphQL API."""
-
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or secret("LINEAR_API_KEY", "")
-        if not self.api_key:
-            raise RuntimeError(
-                "LINEAR_API_KEY not set.\n"
-                "Get one at https://linear.app/settings/account/security → Personal API Keys"
-            )
-        self._http = httpx.Client(
-            base_url=GRAPHQL_ENDPOINT,
-            headers={"Authorization": self.api_key, "Content-Type": "application/json"},
-            timeout=10.0,
-        )
-
-    def _query(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Execute a GraphQL query."""
-        resp = self._http.post("", json={"query": query, "variables": variables or {}})
-        resp.raise_for_status()
-        data = resp.json()
-        if "errors" in data:
-            errors = data["errors"]
-            msg = errors[0].get("message", str(errors))
-            raise RuntimeError(f"Linear API error: {msg}")
-        return data.get("data", {})
+    Read-only GraphQL methods live in ``api.integrations.linear`` so workflows
+    can reuse them. Tool-only mutations stay here.
+    """
 
     def me(self) -> dict[str, Any]:
         """Get authenticated user info."""
-        query = """
-        query Me {
-            viewer { id name email }
-        }
-        """
-        return self._query(query).get("viewer", {})
+        return super().me()
 
     def teams(self, limit: int = 50) -> list[dict[str, Any]]:
-        """List all teams."""
-        query = """
-        query Teams($first: Int!) {
-            teams(first: $first) {
-                nodes { id name key description }
-            }
-        }
-        """
-        return self._query(query, {"first": limit}).get("teams", {}).get("nodes", [])
+        """List teams."""
+        return super().teams(limit=limit)
 
     def issues(
         self,
@@ -64,87 +38,50 @@ class LinearClient:
         limit: int = 50,
         include_archived: bool = False,
     ) -> list[dict[str, Any]]:
-        """List issues with optional filters.
-
-        Args:
-            team_key: Filter by team key (e.g., "ENG")
-            assignee: Filter by assignee name or "me"
-            state: Filter by state name (e.g., "In Progress", "Done")
-            limit: Max results
-            include_archived: Include archived issues
-        """
-        filters = []
-        if team_key:
-            filters.append(f'team: {{ key: {{ eq: "{team_key}" }} }}')
-        if assignee:
-            if assignee.lower() == "me":
-                filters.append("assignee: { isMe: { eq: true } }")
-            else:
-                filters.append(f'assignee: {{ name: {{ containsIgnoreCase: "{assignee}" }} }}')
-        if state:
-            filters.append(f'state: {{ name: {{ containsIgnoreCase: "{state}" }} }}')
-
-        filter_str = ", ".join(filters)
-        filter_arg = f"filter: {{ {filter_str} }}, " if filters else ""
-
-        query = f"""
-        query Issues($first: Int!, $includeArchived: Boolean) {{
-            issues({filter_arg}first: $first, includeArchived: $includeArchived, orderBy: updatedAt) {{
-                nodes {{
-                    id
-                    identifier
-                    title
-                    description
-                    priority
-                    priorityLabel
-                    state {{ id name color }}
-                    assignee {{ id name }}
-                    team {{ id name key }}
-                    project {{ id name }}
-                    cycle {{ id name number }}
-                    labels {{ nodes {{ id name color }} }}
-                    dueDate
-                    createdAt
-                    updatedAt
-                    url
-                }}
-            }}
-        }}
-        """
-        return (
-            self._query(query, {"first": limit, "includeArchived": include_archived})
-            .get("issues", {})
-            .get("nodes", [])
+        """List issues with optional filters."""
+        return super().issues(
+            team_key=team_key,
+            assignee=assignee,
+            state=state,
+            limit=limit,
+            include_archived=include_archived,
         )
 
     def issue(self, issue_id: str) -> dict[str, Any]:
-        """Get a single issue by ID or identifier (e.g., ENG-123)."""
-        query = """
-        query Issue($id: String!) {
-            issue(id: $id) {
-                id
-                identifier
-                title
-                description
-                priority
-                priorityLabel
-                state { id name color }
-                assignee { id name }
-                team { id name key }
-                project { id name }
-                cycle { id name number }
-                labels { nodes { id name color } }
-                comments { nodes { id body user { name } createdAt } }
-                parent { id identifier title }
-                children { nodes { id identifier title state { name } } }
-                dueDate
-                createdAt
-                updatedAt
-                url
-            }
-        }
-        """
-        return self._query(query, {"id": issue_id}).get("issue", {})
+        """Get a single issue by ID or identifier."""
+        return super().issue(issue_id)
+
+    def fetch_asset(self, url: str, filename: str | None = None) -> dict[str, Any]:
+        """Download a Linear-hosted asset such as an embedded screenshot."""
+        return super().fetch_asset(url, filename=filename)
+
+    def projects(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List projects."""
+        return super().projects(limit=limit)
+
+    def project(self, project_id: str) -> dict[str, Any]:
+        """Get a single project."""
+        return super().project(project_id)
+
+    def cycles(self, team_key: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        """List cycles, optionally filtered by team."""
+        return super().cycles(team_key=team_key, limit=limit)
+
+    def workflow_states(self, team_key: str | None = None) -> list[dict[str, Any]]:
+        """List workflow states, optionally filtered by team."""
+        return super().workflow_states(team_key=team_key)
+
+    def labels(self, team_key: str | None = None) -> list[dict[str, Any]]:
+        """List issue labels, optionally filtered by team."""
+        return super().labels(team_key=team_key)
+
+    def users(self, limit: int = 100) -> list[dict[str, Any]]:
+        """List workspace users."""
+        return super().users(limit=limit)
+
+    def search_issues(self, query_str: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Search issues by text."""
+        return super().search_issues(query_str=query_str, limit=limit)
 
     def create_issue(
         self,
@@ -252,149 +189,92 @@ class LinearClient:
         result = self._query(mutation, {"input": {"issueId": issue_id, "body": body}})
         return result.get("commentCreate", {}).get("comment", {})
 
-    def projects(self, limit: int = 50) -> list[dict[str, Any]]:
-        """List all projects."""
+    def _resolve_label_ids(self, names: list[str], team_key: str | None = None) -> dict[str, str]:
+        """Resolve label names to IDs, preferring a team-scoped label over a
+        workspace label of the same name. Raises if any requested name is
+        missing, or is ambiguous within its chosen scope.
+        """
+        if not names:
+            return {}
         query = """
-        query Projects($first: Int!) {
-            projects(first: $first, orderBy: updatedAt) {
-                nodes {
-                    id
-                    name
-                    description
-                    state
-                    progress
-                    startDate
-                    targetDate
-                    lead { id name }
-                    teams { nodes { id name key } }
-                    url
-                }
+        query Labels($names: [String!]) {
+            issueLabels(filter: { name: { in: $names } }, first: 250) {
+                nodes { id name team { key } }
             }
         }
         """
-        return self._query(query, {"first": limit}).get("projects", {}).get("nodes", [])
+        nodes = self._query(query, {"names": names}).get("issueLabels", {}).get("nodes", [])
 
-    def project(self, project_id: str) -> dict[str, Any]:
-        """Get a single project."""
-        query = """
-        query Project($id: String!) {
-            project(id: $id) {
-                id
-                name
-                description
-                state
-                progress
-                startDate
-                targetDate
-                lead { id name }
-                teams { nodes { id name key } }
-                issues { nodes { id identifier title state { name } } }
-                url
-            }
+        team_hits: dict[str, list[str]] = {n: [] for n in names}
+        workspace_hits: dict[str, list[str]] = {n: [] for n in names}
+        for node in nodes:
+            name = node.get("name")
+            if name not in team_hits:
+                continue
+            node_team = node.get("team")
+            if not node_team:
+                workspace_hits[name].append(node["id"])
+            elif team_key and node_team.get("key") == team_key:
+                team_hits[name].append(node["id"])
+
+        resolved: dict[str, str] = {}
+        missing: list[str] = []
+        dup: list[str] = []
+        for name in names:
+            source = team_hits[name] if team_hits[name] else workspace_hits[name]
+            if not source:
+                missing.append(name)
+            elif len(source) > 1:
+                scope = f"team {team_key}" if team_hits[name] else "workspace"
+                dup.append(f"{name} ({scope})")
+            else:
+                resolved[name] = source[0]
+
+        if missing:
+            raise RuntimeError(
+                f"missing label(s): {', '.join(missing)}. "
+                f"Create them in team {team_key or '<workspace>'} or at the workspace level."
+            )
+        if dup:
+            raise RuntimeError(
+                f"ambiguous label(s): {', '.join(dup)}. Each must exist exactly once in its scope."
+            )
+        return resolved
+
+    def add_label(
+        self, issue_id: str, label_name: str, team_key: str | None = None
+    ) -> dict[str, Any]:
+        """Add a single label (by name) to an issue, leaving its other labels
+        untouched. Prefer this over ``update_issue(label_ids=...)`` for
+        incremental changes, since ``issueUpdate`` replaces the full label set.
+
+        Pass ``team_key`` to bind to a team-scoped label when a workspace label
+        of the same name also exists.
+        """
+        label_id = self._resolve_label_ids([label_name], team_key)[label_name]
+        mutation = """
+        mutation AddLabel($id: String!, $labelId: String!) {
+            issueAddLabel(id: $id, labelId: $labelId) { success }
         }
         """
-        return self._query(query, {"id": project_id}).get("project", {})
+        result = self._query(mutation, {"id": issue_id, "labelId": label_id})
+        return {"success": result.get("issueAddLabel", {}).get("success", False)}
 
-    def cycles(self, team_key: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
-        """List cycles, optionally filtered by team."""
-        filter_str = ""
-        if team_key:
-            filter_str = f'filter: {{ team: {{ key: {{ eq: "{team_key}" }} }} }}, '
-
-        query = f"""
-        query Cycles($first: Int!) {{
-            cycles({filter_str}first: $first, orderBy: updatedAt) {{
-                nodes {{
-                    id
-                    name
-                    number
-                    startsAt
-                    endsAt
-                    progress
-                    team {{ id name key }}
-                    issues {{ nodes {{ id identifier title state {{ name }} }} }}
-                }}
-            }}
-        }}
+    def remove_label(
+        self, issue_id: str, label_name: str, team_key: str | None = None
+    ) -> dict[str, Any]:
+        """Remove a single label (by name) from an issue, leaving its other
+        labels untouched. Succeeds even if the label isn't currently applied;
+        raises only if no label by that name exists in the chosen scope.
         """
-        return self._query(query, {"first": limit}).get("cycles", {}).get("nodes", [])
-
-    def workflow_states(self, team_key: str | None = None) -> list[dict[str, Any]]:
-        """List workflow states, optionally filtered by team."""
-        filter_str = ""
-        if team_key:
-            filter_str = f'filter: {{ team: {{ key: {{ eq: "{team_key}" }} }} }}, '
-
-        query = f"""
-        query WorkflowStates {{
-            workflowStates({filter_str}first: 100) {{
-                nodes {{
-                    id
-                    name
-                    color
-                    type
-                    position
-                    team {{ id name key }}
-                }}
-            }}
-        }}
-        """
-        return self._query(query).get("workflowStates", {}).get("nodes", [])
-
-    def labels(self, team_key: str | None = None) -> list[dict[str, Any]]:
-        """List labels, optionally filtered by team."""
-        filter_str = ""
-        if team_key:
-            filter_str = f'filter: {{ team: {{ key: {{ eq: "{team_key}" }} }} }}, '
-
-        query = f"""
-        query Labels {{
-            issueLabels({filter_str}first: 100) {{
-                nodes {{
-                    id
-                    name
-                    color
-                    team {{ id name key }}
-                }}
-            }}
-        }}
-        """
-        return self._query(query).get("issueLabels", {}).get("nodes", [])
-
-    def users(self, limit: int = 100) -> list[dict[str, Any]]:
-        """List workspace users."""
-        query = """
-        query Users($first: Int!) {
-            users(first: $first) {
-                nodes { id name email displayName active }
-            }
+        label_id = self._resolve_label_ids([label_name], team_key)[label_name]
+        mutation = """
+        mutation RemoveLabel($id: String!, $labelId: String!) {
+            issueRemoveLabel(id: $id, labelId: $labelId) { success }
         }
         """
-        return self._query(query, {"first": limit}).get("users", {}).get("nodes", [])
-
-    def search_issues(self, query_str: str, limit: int = 25) -> list[dict[str, Any]]:
-        """Search issues by text."""
-        query = """
-        query SearchIssues($query: String!, $first: Int!) {
-            searchIssues(query: $query, first: $first) {
-                nodes {
-                    id
-                    identifier
-                    title
-                    state { name }
-                    assignee { name }
-                    team { key }
-                    dueDate
-                    url
-                }
-            }
-        }
-        """
-        return (
-            self._query(query, {"query": query_str, "first": limit})
-            .get("searchIssues", {})
-            .get("nodes", [])
-        )
+        result = self._query(mutation, {"id": issue_id, "labelId": label_id})
+        return {"success": result.get("issueRemoveLabel", {}).get("success", False)}
 
     def create_issue_relation(
         self,
@@ -433,7 +313,6 @@ class LinearClient:
         }
         result = self._query(mutation, {"input": input_data})
         return result.get("issueRelationCreate", {})
-
 
 
 def _client() -> LinearClient:

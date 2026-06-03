@@ -660,3 +660,93 @@ async def test_tool_rest_router_lists_describes_and_invokes_tools(
             '{"error": "Method \'missing\' not found in tool \'alpha\'", '
             '"available_methods": ["async_echo", "secret_values", "sync_echo"]}'
         )
+
+
+class TestHarnessSecretSelection:
+    """ToolManager picks the right harness credentials for a sandbox based on
+    its engine and auth-mode env vars."""
+
+    def _names(self, secrets: list) -> set[str]:
+        return {getattr(s, "name", None) for s in secrets}
+
+    def test_claude_code_api_key_includes_anthropic_excludes_openai(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(
+            tm.secrets_for_sandbox("claude-code", {"CLAUDE_CODE_AUTH_MODE": "api_key"})
+        )
+        assert "ANTHROPIC_API_KEY" in names
+        assert "OPENAI_API_KEY" not in names
+        assert "anthropic-claude" not in names
+
+    def test_claude_code_access_token_swaps_to_brokered(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(
+            tm.secrets_for_sandbox(
+                "claude-code", {"CLAUDE_CODE_AUTH_MODE": "access_token"}
+            )
+        )
+        assert "anthropic-claude" in names
+        assert "ANTHROPIC_API_KEY" not in names
+        assert "OPENAI_API_KEY" not in names
+
+    def test_codex_api_key_includes_openai_excludes_anthropic(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(
+            tm.secrets_for_sandbox("codex", {"CODEX_AUTH_MODE": "api_key"})
+        )
+        assert "OPENAI_API_KEY" in names
+        assert "ANTHROPIC_API_KEY" not in names
+        assert "openai-codex" not in names
+
+    def test_codex_access_token_swaps_to_brokered_with_account_id(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(
+            tm.secrets_for_sandbox("codex", {"CODEX_AUTH_MODE": "access_token"})
+        )
+        assert "openai-codex" in names
+        assert "OPENAI_CODEX_ACCOUNT_ID" in names
+        assert "OPENAI_API_KEY" not in names
+
+    def test_unset_auth_mode_defaults_to_api_key(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(tm.secrets_for_sandbox("claude-code", {}))
+        assert "ANTHROPIC_API_KEY" in names
+        assert "anthropic-claude" not in names
+
+    def test_unknown_engine_gets_no_harness_extras(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(
+            tm.secrets_for_sandbox("amp", {"CLAUDE_CODE_AUTH_MODE": "access_token"})
+        )
+        assert "ANTHROPIC_API_KEY" not in names
+        assert "OPENAI_API_KEY" not in names
+        # Base infra secrets (AMP_API_KEY, GITHUB_TOKEN, etc.) still present.
+        assert "AMP_API_KEY" in names
+
+    def test_slack_etl_token_is_global_proxy_secret(self) -> None:
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        secrets = tm.collect_secrets()
+        slack_etl = next(s for s in secrets if getattr(s, "name", None) == "SLACK_ETL_TOKEN")
+        assert slack_etl.secret_ref == "SLACK_ETL_TOKEN"
+        assert slack_etl.hosts == ("*.slack.com",)
+        assert slack_etl.match_headers == ("Authorization",)
+
+    def test_collect_secrets_returns_union_of_all_harness_variants(self) -> None:
+        """The shared API-side proxy and token broker need every harness
+        credential so they can manage the full set regardless of which mode
+        any individual sandbox is using right now."""
+        tm = ToolManager.__new__(ToolManager)
+        tm.tools = {}
+        names = self._names(tm.collect_secrets())
+        assert "ANTHROPIC_API_KEY" in names
+        assert "OPENAI_API_KEY" in names
+        assert "anthropic-claude" in names
+        assert "openai-codex" in names
+        assert "OPENAI_CODEX_ACCOUNT_ID" in names

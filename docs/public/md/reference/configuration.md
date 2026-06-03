@@ -82,6 +82,7 @@ Execution tuning:
 | `THREAD_FAILURE_LOOP_WINDOW_S`, `THREAD_FAILURE_LOOP_THRESHOLD` | `api.extraEnv`. | Repeated thread failure detection. |
 | `IDLE_TTL_S`, `SUSPENDED_RETENTION_S`, `MAX_ACTIVE_SANDBOX_SESSIONS` | `api.extraEnv`. | Sandbox cleanup limits. |
 | `STREAM_EOF_REATTACH_MAX`, `STREAM_EOF_REATTACH_BACKOFF_S` | `api.extraEnv`. | Stream reattach retry behavior. |
+| `SANDBOX_CROSS_THREAD_READS` | `api.extraEnv`. | Lets a sandbox token read any thread it has the key for (messages, status, attachments). Defaults to enabled. Set to `0` to confine reads to the token's own thread. Writes are always confined regardless. |
 
 ## Slackbot
 
@@ -168,6 +169,15 @@ Slack ETL workflows:
 | `SLACK_ETL_EXCLUDED_CHANNEL_PATTERNS` | `api.slackEtlExcludedChannelPatterns`. | Comma-separated channel-name globs to skip. |
 | `SLACK_BACKFILL_ENABLED`, `SLACK_BACKFILL_CHANNEL_BATCH_LIMIT`, `SLACK_BACKFILL_CHANNEL_PAGES_PER_JOB` | `api.extraEnv` or chart batch limit. | Backfill enablement and batch sizing. |
 | `COMPANY_CONTEXT_DOCUMENTS_ENABLED` | `api.extraEnv`. | Enables company-context projection when Slack ETL is on. |
+
+Google Workspace ETL workflows:
+
+| Env var | Set from | Controls |
+| --- | --- | --- |
+| `GOOGLE_DRIVE_ETL_ENABLED` | `api.googleDriveEtlEnabled`. | Enables Google Drive Docs sync. |
+| `GOOGLE_DRIVE_SYNC_INTERVAL_SECONDS` | `api.googleDriveSyncIntervalSeconds`. | Google Drive Docs sync schedule interval. |
+| `GOOGLE_CALENDAR_ETL_ENABLED` | `api.googleCalendarEtlEnabled`. | Enables Google Calendar sync. |
+| `GOOGLE_CALENDAR_SYNC_INTERVAL_SECONDS` | `api.googleCalendarSyncIntervalSeconds`. | Google Calendar sync schedule interval. |
 
 ## Observability and Retention
 

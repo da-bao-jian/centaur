@@ -14,6 +14,9 @@ from api.sandbox.config import container_env as sandbox_container_env
 from api.sandbox.kubernetes import (
     KubernetesExecutorBackend,
     STDOUT_CHANNEL,
+    _OVERLAY_TOOL_DEPS_DIR,
+    _build_tool_server_container,
+    _tool_server_tool_dirs,
 )
 from api.sandbox.kubernetes_agent_sandbox import KubernetesAgentSandboxBackend
 from api.sandbox.registry import auto_configure
@@ -272,19 +275,32 @@ def test_container_env_includes_firewall_host_for_secret_bootstrap(
     assert env_map["AMP_API_KEY"] == "AMP_API_KEY"
     assert env_map["OPENAI_API_KEY"] == "OPENAI_API_KEY"
     assert env_map["CENTAUR_TRACE_ID"] == "00000000-0000-0000-0000-000000000123"
-    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,firewall.internal,api.internal"
+    no_proxy_hosts = env_map["NO_PROXY"].split(",")
+    assert no_proxy_hosts[:6] == [
+        "localhost",
+        "127.0.0.1",
+        "firewall.internal",
+        "victoriametrics",
+        "victorialogs",
+        "api.internal",
+    ]
     assert env_map["no_proxy"] == env_map["NO_PROXY"]
 
 
 def test_container_env_passes_allowed_otel_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CODEX_OTEL_ENVIRONMENT", "staging")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer%20local-key")
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=staging")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otlp-collector:4318")
 
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert env_map["CODEX_OTEL_ENVIRONMENT"] == "staging"
+    assert env_map["OTEL_EXPORTER_OTLP_HEADERS"] == "authorization=Bearer%20local-key"
+    assert env_map["OTEL_RESOURCE_ATTRIBUTES"] == "deployment.environment=staging"
+    assert env_map["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otlp-collector:4318"
+    assert "otlp-collector" in env_map["NO_PROXY"].split(",")
 
 
 def test_container_env_applies_kubernetes_sandbox_extra_env(
@@ -297,11 +313,15 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
             [
                 {
                     "name": "NO_PROXY",
-                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
+                    "value": "localhost,127.0.0.1,metrics.internal",
                 },
                 {
                     "name": "no_proxy",
-                    "value": "localhost,127.0.0.1,api.internal,metrics.internal",
+                    "value": "localhost,127.0.0.1,metrics.internal",
+                },
+                {
+                    "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "value": "http://host.orb.internal:8000",
                 },
             ]
         ),
@@ -310,10 +330,91 @@ def test_container_env_applies_kubernetes_sandbox_extra_env(
     env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
     env_map = dict(item.split("=", 1) for item in env)
 
-    assert env_map["NO_PROXY"] == "localhost,127.0.0.1,api.internal,metrics.internal"
-    assert env_map["no_proxy"] == "localhost,127.0.0.1,api.internal,metrics.internal"
+    # The operator's extra host is added, but the critical computed hosts (the
+    # firewall proxy and the API host) are retained — extraEnv merges, never
+    # replaces, so it can't break sandbox egress.
+    no_proxy_hosts = env_map["NO_PROXY"].split(",")
+    assert "firewall.internal" in no_proxy_hosts
+    assert "victoriametrics" in no_proxy_hosts
+    assert "victorialogs" in no_proxy_hosts
+    assert "api.internal" in no_proxy_hosts
+    assert "metrics.internal" in no_proxy_hosts
+    assert env_map["no_proxy"] == env_map["NO_PROXY"]
+    assert env_map["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.orb.internal:8000"
     assert len([item for item in env if item.startswith("NO_PROXY=")]) == 1
     assert len([item for item in env if item.startswith("no_proxy=")]) == 1
+
+
+def test_container_env_extra_env_cannot_drop_critical_no_proxy_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: an operator NO_PROXY override that omits the API host used to
+    # clobber the computed value, routing API calls through iron-proxy (405).
+    monkeypatch.setenv("AGENT_API_URL", "http://centaur-centaur-api:8000")
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {"name": "NO_PROXY", "value": "localhost,127.0.0.1,centaur-api"},
+                {"name": "no_proxy", "value": "localhost,127.0.0.1,centaur-api"},
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    no_proxy_hosts = env_map["NO_PROXY"].split(",")
+    assert "centaur-centaur-api" in no_proxy_hosts  # real API host survives
+    assert "firewall.internal" in no_proxy_hosts
+    assert "victoriametrics" in no_proxy_hosts
+    assert "victorialogs" in no_proxy_hosts
+    assert "centaur-api" in no_proxy_hosts  # operator's extra is still honored
+
+
+def test_container_env_extra_env_cannot_override_pinned_proxy_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {"name": "HTTPS_PROXY", "value": "http://evil:9999"},
+                {"name": "http_proxy", "value": "http://evil:9999"},
+                {"name": "REQUESTS_CA_BUNDLE", "value": "/tmp/attacker.pem"},
+                {"name": "FIREWALL_HOST", "value": "elsewhere"},
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert env_map["HTTPS_PROXY"] == "http://firewall.internal:8080"
+    assert env_map["http_proxy"] == "http://firewall.internal:8080"
+    assert env_map["REQUESTS_CA_BUNDLE"] == "/firewall-certs/ca-cert.pem"
+    assert env_map["FIREWALL_HOST"] == "firewall.internal"
+
+
+def test_container_env_adds_extra_otel_endpoint_host_to_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {
+                    "name": "OTEL_EXPORTER_OTLP_ENDPOINT",
+                    "value": "http://host.orb.internal:8000",
+                },
+            ]
+        ),
+    )
+
+    env = sandbox_container_env("thread-key", "sandbox-id", "firewall.internal")
+    env_map = dict(item.split("=", 1) for item in env)
+
+    assert "host.orb.internal" in env_map["NO_PROXY"].split(",")
 
 
 def test_prompt_bundle_includes_live_capability_inventory_guidance(
@@ -477,6 +578,146 @@ async def test_create_requires_repo_cache_volume_for_repo(
             "amp",
             repo="paradigmxyz/centaur",
         )
+
+
+def test_tool_server_container_has_verifiable_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar runs tool code that calls back into the API (e.g. the slack
+    tool offloading a download to /agent/attachments/upload), so it must carry
+    a CENTAUR_API_KEY the API accepts — otherwise the callback 401s."""
+    from api.deps import verify_sandbox_token
+
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+    )
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    claims = verify_sandbox_token(env["CENTAUR_API_KEY"])
+    assert claims is not None
+    assert claims["thread_key"] == "slack:C123:123.456"
+    assert claims["container_id"] == "centaur-sandbox-pod-abc"
+    no_proxy_hosts = env["NO_PROXY"].split(",")
+    assert "victoriametrics" in no_proxy_hosts
+    assert "victorialogs" in no_proxy_hosts
+
+
+def test_tool_server_container_inherits_sandbox_extra_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+    monkeypatch.setenv(
+        "KUBERNETES_SANDBOX_EXTRA_ENV",
+        json.dumps(
+            [
+                {
+                    "name": "LAMINAR_BASE_URL",
+                    "value": "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000",
+                },
+                {"name": "LAMINAR_PROJECT_ID", "value": "project-staging"},
+                {
+                    "name": "NO_PROXY",
+                    "value": "stg-laminar-app-server,.stg-laminar.svc.cluster.local",
+                },
+                {"name": "HTTPS_PROXY", "value": "http://operator-proxy:8080"},
+            ]
+        ),
+    )
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount=None,
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+    )
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert (
+        env["LAMINAR_BASE_URL"]
+        == "http://stg-laminar-app-server.stg-laminar.svc.cluster.local:8000"
+    )
+    assert env["LAMINAR_PROJECT_ID"] == "project-staging"
+    assert env["HTTPS_PROXY"] == "http://firewall.internal:8080"
+    assert "firewall.internal" in env["NO_PROXY"]
+    assert "api.internal" in env["NO_PROXY"]
+    assert "stg-laminar-app-server" in env["NO_PROXY"]
+
+
+def test_tool_server_container_installs_overlay_deps_before_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar overrides the image ENTRYPOINT, so it must run the overlay
+    tool-dep install itself. It runs as non-root, so deps go to a writable
+    --target dir — never the root-owned venv. tool-server-startup.sh puts that
+    dir on PYTHONPATH at runtime, so it is not set on the container spec."""
+    monkeypatch.setenv("SANDBOX_SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("KUBERNETES_TOOL_SERVER_IMAGE", "centaur-tools:test")
+
+    container = _build_tool_server_container(
+        thread_key="slack:C123:123.456",
+        container_name="centaur-sandbox-pod-abc",
+        firewall_host="firewall.internal",
+        api_url="http://api.internal:8000",
+        overlay_mount="/home/agent/overlay",
+        database_url="postgres://app_user@firewall.internal:5433/centaur",
+    )
+
+    # The startup script installs overlay deps (best-effort) then execs uvicorn.
+    # It gets the listen port and the writable deps target as args; the script
+    # exports PYTHONPATH itself, so it must not appear on the container spec.
+    assert container["command"] == ["/app/tool-server-startup.sh"]
+    port, target = container["args"]
+    assert target == _OVERLAY_TOOL_DEPS_DIR
+
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert "PYTHONPATH" not in env
+
+
+def test_tool_server_tool_dirs_points_overlay_at_sandbox_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar mounts the overlay at /home/agent/overlay/org, not the API's
+    overlay mount. Its TOOL_DIRS must point there or every overlay tool silently
+    disappears."""
+    monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
+    monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
+
+    assert (
+        _tool_server_tool_dirs()
+        == "/app/tools:/home/agent/overlay/org/tools"
+    )
+
+
+def test_tool_server_tool_dirs_without_overlay_is_base_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("KUBERNETES_TOOL_SERVER_TOOL_DIRS", raising=False)
+    monkeypatch.delenv("CENTAUR_OVERLAY_IMAGE", raising=False)
+
+    assert _tool_server_tool_dirs() == "/app/tools"
+
+
+def test_tool_server_tool_dirs_explicit_override_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "KUBERNETES_TOOL_SERVER_TOOL_DIRS",
+        "/custom/tools",
+    )
+    monkeypatch.setenv("CENTAUR_OVERLAY_IMAGE", "centaur-overlay:test")
+
+    assert _tool_server_tool_dirs() == "/custom/tools"
 
 
 @pytest.mark.asyncio
@@ -674,10 +915,15 @@ async def test_create_builds_per_sandbox_proxy_resources(
     )
     assert sandbox_env["FIREWALL_HOST"] == proxy_service_name
     assert sandbox_env["HTTPS_PROXY"] == f"http://{proxy_service_name}:8080"
-    assert (
-        sandbox_env["NO_PROXY"]
-        == f"localhost,127.0.0.1,{proxy_service_name},api.internal"
-    )
+    no_proxy_hosts = sandbox_env["NO_PROXY"].split(",")
+    assert no_proxy_hosts[:6] == [
+        "localhost",
+        "127.0.0.1",
+        proxy_service_name,
+        "victoriametrics",
+        "victorialogs",
+        "api.internal",
+    ]
     assert proxy_pod["metadata"]["labels"] == {
         "centaur.ai/iron-proxy": "true",
         "centaur.ai/sandbox-id": session.sandbox_id,
@@ -729,6 +975,243 @@ async def test_create_builds_per_sandbox_proxy_resources(
         fake_core.created_pods[2][1]["metadata"]["name"]
         != proxy_pod["metadata"]["name"]
     )
+
+
+class FakeAppsApi:
+    """Minimal AppsV1Api stand-in. Records create/replace/patch and exposes
+    pre-seeded reads via ``deployments_to_read`` (FIFO; Exception items are
+    raised instead of returned, matching real client behavior)."""
+
+    def __init__(self) -> None:
+        self.patched_deployments: list[tuple[str, str, dict]] = []
+        self.created_deployments: list[tuple[str, dict]] = []
+        self.replaced_deployments: list[tuple[str, str, dict]] = []
+        self.deployments_to_read: list = []
+
+    async def read_namespaced_deployment(self, name: str, namespace: str):  # noqa: ANN201, ARG002
+        if not self.deployments_to_read:
+            raise AssertionError(
+                f"unexpected read_namespaced_deployment({name})"
+            )
+        item = self.deployments_to_read.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def create_namespaced_deployment(self, namespace: str, body: dict) -> None:
+        self.created_deployments.append((namespace, body))
+
+    async def replace_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.replaced_deployments.append((namespace, name, body))
+
+    async def patch_namespaced_deployment(
+        self, name: str, namespace: str, body: dict
+    ) -> None:
+        self.patched_deployments.append((namespace, name, body))
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_writes_configmap_and_patches_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+
+    # First reconcile: ConfigMap doesn't exist yet, Deployment exists.
+    fake_core.pods_to_read = []
+    not_found = type("NotFound", (Exception,), {})()
+    not_found.status = 404  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        backend, "_is_not_found", lambda exc: getattr(exc, "status", 0) == 404
+    )
+
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+    fake_apps.deployments_to_read = [object()]  # Deployment exists
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("auth.openai.com",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    await backend._ensure_token_broker(secrets)
+
+    # ConfigMap was created with the rendered broker YAML.
+    assert len(fake_core.created_configmaps) == 1
+    cm = fake_core.created_configmaps[0][1]
+    assert cm["metadata"]["name"] == "centaur-centaur-token-broker-config"
+    assert "credentials:" in cm["data"]["iron-token-broker.yaml"]
+    # Deployment got a config-hash annotation patch.
+    assert len(fake_apps.patched_deployments) == 1
+    _, dep_name, patch = fake_apps.patched_deployments[0]
+    assert dep_name == "centaur-centaur-token-broker"
+    annotations = patch["spec"]["template"]["metadata"]["annotations"]
+    assert "centaur.ai/config-hash" in annotations
+    assert annotations["centaur.ai/config-hash"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_skips_rollout_when_config_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.broker_config import render_broker_yaml
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("auth.openai.com",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    rendered = render_broker_yaml(secrets)
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+
+    # ConfigMap already has the exact rendered content.
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        return SimpleNamespace(data={"iron-token-broker.yaml": rendered})
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+
+    async def fake_replace_cm(name: str, namespace: str, body: dict) -> None:  # noqa: ARG001
+        raise AssertionError("ConfigMap should not be replaced when content unchanged")
+
+    monkeypatch.setattr(
+        fake_core, "replace_namespaced_config_map", fake_replace_cm, raising=False
+    )
+
+    await backend._ensure_token_broker(secrets)
+    # No rollout triggered: Deployment was never read or patched.
+    assert fake_apps.patched_deployments == []
+    assert fake_apps.deployments_to_read == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_token_broker_tolerates_missing_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import KubernetesExecutorBackend
+    from api.tool_manager import BrokeredTokenSecret, OAuthFieldSource
+
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur")
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_NAME", "centaur-centaur-token-broker"
+    )
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "onepassword")
+
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    fake_apps = FakeAppsApi()
+    backend._core = fake_core
+    backend._apps = fake_apps
+    not_found = type("NotFound", (Exception,), {})()
+    not_found.status = 404  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        backend, "_is_not_found", lambda exc: getattr(exc, "status", 0) == 404
+    )
+
+    async def fake_read_cm(name: str, namespace: str):  # noqa: ARG001, ANN202
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_core, "read_namespaced_config_map", fake_read_cm, raising=False
+    )
+
+    async def fake_patch_deployment(name: str, namespace: str, body: dict) -> None:  # noqa: ARG001
+        raise not_found
+
+    monkeypatch.setattr(
+        fake_apps, "patch_namespaced_deployment", fake_patch_deployment, raising=False
+    )
+
+    secrets = [
+        BrokeredTokenSecret(
+            name="codex",
+            hosts=("h",),
+            fields=(
+                ("client_id", OAuthFieldSource("CODEX_CLIENT_ID")),
+                ("refresh_token", OAuthFieldSource("CODEX_BLOB")),
+            ),
+            token_endpoint="https://h/token",
+        ),
+    ]
+    # Should not raise — the ConfigMap is written so the broker picks up
+    # the latest config whenever helm upgrade lands.
+    await backend._ensure_token_broker(secrets)
+    assert len(fake_core.created_configmaps) == 1
+
+
+def test_proxy_iron_env_omits_broker_when_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _proxy_iron_env
+
+    monkeypatch.delenv("KUBERNETES_TOKEN_BROKER_URL", raising=False)
+    env = _proxy_iron_env("centaur-infra-env", [])
+    names = [e["name"] for e in env]
+    assert "IRON_BROKER_URL" not in names
+    assert "IRON_BROKER_TOKEN" not in names
+
+
+def test_proxy_iron_env_injects_broker_when_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.sandbox.kubernetes import _proxy_iron_env
+
+    monkeypatch.setenv(
+        "KUBERNETES_TOKEN_BROKER_URL", "http://centaur-token-broker:8181"
+    )
+    env = _proxy_iron_env("centaur-infra-env", [])
+    by_name = {e["name"]: e for e in env}
+    assert by_name["IRON_BROKER_URL"]["value"] == (
+        "http://centaur-token-broker:8181"
+    )
+    assert by_name["IRON_BROKER_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "centaur-infra-env",
+        "key": "IRON_BROKER_TOKEN",
+    }
 
 
 @pytest.mark.asyncio
@@ -1517,3 +2000,149 @@ async def test_recover_warm_returns_running_warm_pods_and_cleans_stale(
         "centaur-sandbox",
         "centaur-sandbox-warm-finished-cfg",
     ) in fake_core.deleted_secrets
+
+
+def _stub_create_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: "KubernetesExecutorBackend",
+    *,
+    extra_env: list[dict[str, str]] | None = None,
+    harness_cmd: str = "claude-app-wrapper",
+) -> None:
+    """Common environment setup for create()-flow integration tests."""
+    from api.tool_manager import ToolManager
+
+    monkeypatch.setenv("AGENT_API_URL", "http://api.internal:8000")
+    monkeypatch.delenv("FIREWALL_HOST", raising=False)
+    monkeypatch.setenv("KUBERNETES_FIREWALL_CA_SECRET_NAME", "firewall-ca")
+    monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-sandbox")
+    monkeypatch.setenv("KUBERNETES_IRON_PROXY_IMAGE", "centaur-iron-proxy:test")
+    if extra_env is None:
+        monkeypatch.delenv("KUBERNETES_SANDBOX_EXTRA_ENV", raising=False)
+    else:
+        monkeypatch.setenv("KUBERNETES_SANDBOX_EXTRA_ENV", json.dumps(extra_env))
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes._prompt_bundle", lambda persona: "prompt"
+    )
+    monkeypatch.setattr(
+        "api.sandbox.kubernetes.build_harness_cmd", lambda *_args: [harness_cmd]
+    )
+    monkeypatch.setattr("api.sandbox.kubernetes.image", lambda: "centaur-agent:test")
+
+    # Bypass tool discovery (which needs DATABASE_URL) by instantiating a
+    # ToolManager with an empty tool table. The harness-secret selection
+    # logic doesn't depend on loaded tools.
+    bare_tm = ToolManager.__new__(ToolManager)
+    bare_tm.tools = {}
+    fake_app = types.ModuleType("api.app")
+    fake_app.get_tool_manager = lambda: bare_tm
+    monkeypatch.setitem(sys.modules, "api.app", fake_app)
+
+    async def fake_ensure_clients() -> None:
+        return None
+
+    async def fake_wait_ready(_pod_name: str) -> float:
+        return 0.01
+
+    monkeypatch.setattr(backend, "_ensure_clients", fake_ensure_clients)
+    monkeypatch.setattr(backend, "_wait_pod_ready", fake_wait_ready)
+    monkeypatch.setattr(backend, "_wait_ready", fake_wait_ready)
+
+
+@pytest.mark.asyncio
+async def test_create_uses_brokered_creds_for_claude_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """claude-code + CLAUDE_CODE_AUTH_MODE=access_token must publish the
+    brokered ``anthropic-claude`` credential into the per-sandbox iron-proxy
+    configmap and must NOT include ``ANTHROPIC_API_KEY``."""
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(
+        monkeypatch,
+        backend,
+        extra_env=[{"name": "CLAUDE_CODE_AUTH_MODE", "value": "access_token"}],
+    )
+
+    await backend.create("slack:C123:123.456", "claude-code", "claude-code")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "anthropic-claude" in proxy_yaml
+    assert "ANTHROPIC_API_KEY" not in proxy_yaml
+    # Wrong-engine harness creds must not leak in.
+    assert "openai-codex" not in proxy_yaml
+    assert "OPENAI_API_KEY" not in proxy_yaml
+
+
+@pytest.mark.asyncio
+async def test_create_uses_brokered_creds_for_codex_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """codex + CODEX_AUTH_MODE=access_token must publish the brokered
+    ``openai-codex`` credential plus the ``OPENAI_CODEX_ACCOUNT_ID`` header
+    inject, and must NOT include ``OPENAI_API_KEY``."""
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(
+        monkeypatch,
+        backend,
+        extra_env=[{"name": "CODEX_AUTH_MODE", "value": "access_token"}],
+        harness_cmd="codex-app-wrapper",
+    )
+
+    await backend.create("slack:C123:123.456", "codex", "codex")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "openai-codex" in proxy_yaml
+    assert "OPENAI_CODEX_ACCOUNT_ID" in proxy_yaml
+    assert "OPENAI_API_KEY" not in proxy_yaml
+    # Wrong-engine harness creds must not leak in.
+    assert "anthropic-claude" not in proxy_yaml
+    assert "ANTHROPIC_API_KEY" not in proxy_yaml
+
+
+@pytest.mark.asyncio
+async def test_create_uses_api_key_in_default_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no AUTH_MODE set, each engine gets its ``api_key`` HttpSecret and
+    no brokered credential — the existing behavior before OAuth modes."""
+    # claude-code default
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(monkeypatch, backend)
+
+    await backend.create("slack:C123:123.456", "claude-code", "claude-code")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "ANTHROPIC_API_KEY" in proxy_yaml
+    assert "anthropic-claude" not in proxy_yaml
+    # The other engine's creds must not leak in.
+    assert "OPENAI_API_KEY" not in proxy_yaml
+    assert "openai-codex" not in proxy_yaml
+
+
+@pytest.mark.asyncio
+async def test_create_isolates_codex_api_key_from_claude_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claude-code sandbox in api_key mode must not see OPENAI_API_KEY; a
+    codex sandbox in api_key mode must not see ANTHROPIC_API_KEY. Each
+    sandbox's iron-proxy holds only the creds its harness uses."""
+    backend = KubernetesExecutorBackend()
+    fake_core = FakeCoreApi()
+    backend._core = fake_core
+    backend._networking = FakeNetworkingApi()
+    _stub_create_dependencies(monkeypatch, backend, harness_cmd="codex-app-wrapper")
+
+    await backend.create("slack:C123:123.456", "codex", "codex")
+
+    proxy_yaml = fake_core.created_configmaps[0][1]["data"]["proxy.yaml"]
+    assert "OPENAI_API_KEY" in proxy_yaml
+    assert "ANTHROPIC_API_KEY" not in proxy_yaml
