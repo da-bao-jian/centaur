@@ -7,7 +7,7 @@ import hashlib
 import json
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -28,7 +28,10 @@ def test_agent_session_title_formats_base_and_persona_runs():
 
 
 def test_slackbot_streamed_answer_chars_requires_positive_integer_offset():
-    from api.runtime_control import _slackbot_streamed_answer_chars
+    from api.runtime_control import (
+        _slackbot_live_delivery_covers_result,
+        _slackbot_streamed_answer_chars,
+    )
 
     assert _slackbot_streamed_answer_chars(0) == 0
     assert _slackbot_streamed_answer_chars(None) == 0
@@ -36,6 +39,9 @@ def test_slackbot_streamed_answer_chars_requires_positive_integer_offset():
     assert _slackbot_streamed_answer_chars("25") == 0
     assert _slackbot_streamed_answer_chars(-3) == 0
     assert _slackbot_streamed_answer_chars(25) == 25
+    assert _slackbot_live_delivery_covers_result("", 0) is True
+    assert _slackbot_live_delivery_covers_result("already streamed", 16) is True
+    assert _slackbot_live_delivery_covers_result("cut off report", 6) is False
 
 
 def _auth(api_key: str) -> dict[str, str]:
@@ -1434,16 +1440,15 @@ async def test_mark_execution_terminal_skips_durable_delivery_after_live_answer(
 
 
 @pytest.mark.asyncio
-async def test_mark_execution_terminal_enqueues_durable_delivery_after_partial_live_answer(
-    db_pool,
-):
+async def test_mark_execution_terminal_falls_back_after_cut_off_live_answer(db_pool):
     from api.runtime_control import _mark_execution_terminal
 
     execution_id = f"exe-{uuid.uuid4().hex[:10]}"
     thread_key = f"slack:C-test:{uuid.uuid4().hex}"
     runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
-    result_text = "already streamed plus missing tail"
-    streamed_chars = len("already streamed")
+    streamed_prefix = "Partial Slack prefix.\n\n"
+    remaining_report = "Full report remainder with the details Slack never received."
+    result_text = streamed_prefix + remaining_report
     await db_pool.execute(
         "INSERT INTO sandbox_sessions (thread_key, sandbox_id, harness, engine, state) "
         "VALUES ($1, $2, 'codex', 'codex', 'idle')",
@@ -1462,15 +1467,22 @@ async def test_mark_execution_terminal_enqueues_durable_delivery_after_partial_l
         "INSERT INTO agent_execution_requests ("
         "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
         "delivery, metadata, started_at"
-        ") VALUES ($1, $2, 1, 'exec-partial-live-answer', 'hash-partial-live-answer', "
-        "'running', $3::jsonb, $4::jsonb, NOW())",
+        ") VALUES ($1, $2, 1, 'exec-cutoff-live', 'hash-cutoff-live', 'running', "
+        "$3::jsonb, $4::jsonb, NOW())",
         execution_id,
         thread_key,
-        json.dumps({"platform": "slack", "channel": "C-test"}),
+        json.dumps(
+            {
+                "platform": "slack",
+                "channel": "C-test",
+                "thread_ts": "1779333881.200699",
+            }
+        ),
         json.dumps(
             {
                 "slackbot_live_delivery": True,
-                "slackbot_agent_session_id": "sess-partial-live-answer",
+                "slackbot_agent_session_id": "sess-cutoff-live",
+                "slackbot_streamed_answer_chars": len(streamed_prefix),
             }
         ),
     )
@@ -1489,7 +1501,6 @@ async def test_mark_execution_terminal_enqueues_durable_delivery_after_partial_l
         terminal_reason="completed",
         result_text=result_text,
         error_text=None,
-        slackbot_streamed_answer_chars_override=streamed_chars,
     )
 
     outbox = await db_pool.fetchrow(
@@ -1502,7 +1513,7 @@ async def test_mark_execution_terminal_enqueues_durable_delivery_after_partial_l
     if isinstance(final_payload, str):
         final_payload = json.loads(final_payload)
     assert final_payload["result_text"] == result_text
-    assert final_payload["slackbot_streamed_answer_chars"] == streamed_chars
+    assert final_payload["slackbot_streamed_answer_chars"] == len(streamed_prefix)
     ready_events = await db_pool.fetchval(
         "SELECT COUNT(*) FROM agent_execution_events "
         "WHERE execution_id = $1 AND event_kind = 'final_delivery_ready'",
@@ -3405,6 +3416,95 @@ async def test_worker_marks_silence_deadline_exceeded_and_stops_session(db_pool)
     assert execution["terminal_reason"] == "silence_deadline_exceeded"
     assert "no progress" in (execution["error_text"] or "")
     stop_session_mock.assert_awaited_once_with(thread_key)
+
+
+@pytest.mark.asyncio
+async def test_worker_completes_no_input_wakeup_without_starting_stdout(db_pool):
+    from api.runtime_control import _process_execution
+
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}"
+    execution_id = f"exe-{uuid.uuid4().hex[:12]}"
+    runtime_id = f"rt-{uuid.uuid4().hex[:8]}"
+
+    await db_pool.execute(
+        "INSERT INTO agent_runtime_assignments ("
+        "thread_key, assignment_generation, runtime_id, harness, engine, "
+        "persona_id, prompt_ref, effective_agents_md_sha256, state"
+        ") VALUES ($1, 1, $2, 'amp', 'amp', NULL, 'harness:amp', 'sha', 'active')",
+        thread_key,
+        runtime_id,
+    )
+    await db_pool.execute(
+        "INSERT INTO agent_execution_requests ("
+        "execution_id, thread_key, assignment_generation, execute_id, request_hash, status, "
+        "delivery, metadata, hard_deadline_at"
+        ") VALUES ($1, $2, 1, 'exec-idem', 'hash', 'running', '{}'::jsonb, '{}'::jsonb, NOW() + INTERVAL '10 minutes')",
+        execution_id,
+        thread_key,
+    )
+
+    row = {
+        "execution_id": execution_id,
+        "thread_key": thread_key,
+        "assignment_generation": 1,
+        "delivery": {},
+        "metadata": {},
+        "hard_deadline_at": dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10),
+        "created_at": dt.datetime.now(dt.timezone.utc),
+        "claimed_at": dt.datetime.now(dt.timezone.utc),
+    }
+    session = SandboxSession(
+        sandbox_id=runtime_id,
+        thread_key=thread_key,
+        harness="amp",
+        engine="amp",
+    )
+
+    get_backend_mock = Mock()
+    stream_mock = Mock()
+    stop_session_mock = AsyncMock()
+    with (
+        patch("api.runtime_control.get_or_spawn", new=AsyncMock(return_value=session)),
+        patch(
+            "api.runtime_control.inject_stdin",
+            new=AsyncMock(return_value={"ok": True, "injected": False}),
+        ),
+        patch("api.runtime_control.get_backend", get_backend_mock),
+        patch("api.runtime_control._stream_stdout", stream_mock),
+        patch("api.runtime_control.stop_session", stop_session_mock),
+    ):
+        await _process_execution(db_pool, row)
+
+    execution = await db_pool.fetchrow(
+        "SELECT status, terminal_reason, durable_turn_id, error_text "
+        "FROM agent_execution_requests WHERE execution_id = $1",
+        execution_id,
+    )
+    assert execution is not None
+    assert execution["status"] == "completed"
+    assert execution["terminal_reason"] == "no_input"
+    assert execution["durable_turn_id"] is None
+    assert execution["error_text"] is None
+    get_backend_mock.assert_not_called()
+    stream_mock.assert_not_called()
+    stop_session_mock.assert_not_awaited()
+
+    summary = await db_pool.fetchrow(
+        "SELECT event_json FROM agent_execution_events "
+        "WHERE execution_id = $1 AND event_kind = 'execution_summary'",
+        execution_id,
+    )
+    assert summary is not None
+    payload = json.loads(summary["event_json"])
+    assert payload["status"] == "completed"
+    assert payload["terminal_reason"] == "no_input"
+    assert payload["raw_event_count"] == 0
+
+    outbox = await db_pool.fetchrow(
+        "SELECT 1 FROM agent_final_delivery_outbox WHERE execution_id = $1",
+        execution_id,
+    )
+    assert outbox is None
 
 
 @pytest.mark.asyncio

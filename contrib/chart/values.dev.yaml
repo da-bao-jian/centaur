@@ -18,6 +18,8 @@ slackbot:
     pullPolicy: IfNotPresent
 
 api:
+  image:
+    pullPolicy: IfNotPresent
   executionWorkerEnabled: true
   pluginWatcherEnabled: true
   egressDiscovery:
@@ -37,6 +39,9 @@ ironProxy:
   manager:
     secretSource: onepassword
 
+tokenBroker:
+  enabled: true
+
 sandbox:
   image:
     pullPolicy: IfNotPresent
@@ -45,3 +50,8 @@ codexTokenRotator:
   enabled: true
   image:
     pullPolicy: IfNotPresent
+
+# Run the tool-server sidecar by default in dev so local clusters mirror
+# production sandbox topology.
+toolServer:
+  enabled: true

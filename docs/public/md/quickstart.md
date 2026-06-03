@@ -5,9 +5,13 @@ description: Boot Centaur locally and verify the control plane.
 
 # Quickstart
 
-This guide gets you from a fresh checkout to a working local Centaur stack. The
-happy path is: point `kubectl` at a local cluster, bootstrap the required infra
-Secret, run `just up`, verify the API, then run one agent turn without Slack.
+This guide gets you from a fresh checkout to a working local Centaur stack. You
+do not need a full production Kubernetes installation for local setup: a
+lightweight k3s-based cluster is enough. The happy path is: point `kubectl` at
+that cluster, bootstrap the required infra Secret, run `just up`, verify the
+API, then run one agent turn without Slack. If you want the easiest small-host
+path first, start with [Running Centaur on a Mac Mini-style
+setup](/mac-mini-setup).
 
 If you want an agent to drive setup with you, point it at these docs: every page
 is available through `/llms.txt`, `/llms-full.txt`, and static Markdown files
@@ -21,10 +25,12 @@ From the repo root:
 brew install just kubectl helm jq
 ```
 
-You also need Docker and a local Kubernetes cluster. The most direct path on
-macOS is Docker Desktop with Kubernetes enabled, but kind, minikube, and k3d are
-fine as long as `kubectl` points at that local cluster and it can run the Helm
-chart.
+You also need Docker and a local Kubernetes cluster. This can be lightweight:
+k3s works on a small VPS, DigitalOcean droplet, Linux box, or Mac Mini-style
+host. Docker Desktop with Kubernetes enabled, kind, and minikube are also fine
+as long as `kubectl` points at that local cluster and it can run the Helm chart.
+The [Mac Mini-style setup guide](/mac-mini-setup) walks through the k3s path
+and includes notes for macOS/kind local evaluation.
 
 Check the target before booting Centaur:
 
@@ -142,11 +148,32 @@ If you changed the namespace or release name, set `CENTAUR_NAMESPACE` and
 `CENTAUR_RELEASE` before running `just smoke` so the recipe targets the right
 deployment.
 
-## 6. Try Slack after the API works
+## 6. Setup Slack integration
 
-Mention the bot in a test channel where the Slack app is installed:
+Slack needs to reach the Slackbot webhook at a public HTTPS URL. Configure your
+network, ingress, or local tunnel so the Slackbot route is reachable at:
 
 ```text
+https://<your-host>/api/webhooks/slack
+```
+
+In your Slack app's **Event Subscriptions** settings, set the Request URL to the
+Slackbot webhook URL above.
+
+Subscribe to the `app_mention` bot event. For a minimal channel-mention test,
+the app also needs Bot Token Scopes that let it read mentions and write replies,
+for example `app_mentions:read` and `chat:write`. If you enable DM events such
+as `message.im`, Slack will also require direct-message scopes such as
+`im:history`.
+
+Save changes and reinstall the app.
+
+## 7. Try Slack mentions
+
+Invite the bot to a test channel and mention it:
+
+```text
+/invite @<your bot's username>
 @<your bot's username> reply with exactly PONG
 ```
 
@@ -158,3 +185,5 @@ If Slack receives the mention but no agent runs, inspect Slackbot logs:
 ```bash
 just logs slackbot
 ```
+
+You should see `POST /api/webhooks/slack`.
