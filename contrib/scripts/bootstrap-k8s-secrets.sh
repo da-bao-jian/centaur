@@ -11,6 +11,7 @@ Usage: scripts/bootstrap-k8s-secrets.sh [--namespace NAMESPACE] [--force]
 Creates the required local-dev Kubernetes infra Secrets consumed by the Helm chart.
 Requires OP_SERVICE_ACCOUNT_TOKEN, OP_VAULT, SLACK_BOT_TOKEN,
 SLACK_SIGNING_SECRET, and SLACKBOT_API_KEY in the shell environment.
+Set SLACK_APP_TOKEN to enable Slack Socket Mode without a public webhook URL.
 
 Optional 1Password Connect bootstrap (when ironProxy.manager.secretSource is
 set to onepassword-connect in the Helm values):
@@ -114,6 +115,9 @@ if secret_exists centaur-infra-env; then
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     patch_data+=("\"OP_CONNECT_TOKEN\":\"$(printf '%s' "$OP_CONNECT_TOKEN" | base64 | tr -d '\n')\"")
   fi
+  if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
+    patch_data+=("\"SLACK_APP_TOKEN\":\"$(printf '%s' "$SLACK_APP_TOKEN" | base64 | tr -d '\n')\"")
+  fi
   # Top-up IRON_BROKER_TOKEN for clusters bootstrapped before iron-token-broker
   # support landed. Only generated when absent so we don't rotate it out from
   # under cached iron-proxy access tokens on every script run.
@@ -199,6 +203,9 @@ else
   )
   if [[ -n "${OP_CONNECT_TOKEN:-}" ]]; then
     secret_args+=(--from-literal=OP_CONNECT_TOKEN="$OP_CONNECT_TOKEN")
+  fi
+  if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
+    secret_args+=(--from-literal=SLACK_APP_TOKEN="$SLACK_APP_TOKEN")
   fi
   if [[ -n "${LOCAL_DEV_API_KEY:-}" ]]; then
     secret_args+=(--from-literal=LOCAL_DEV_API_KEY="$LOCAL_DEV_API_KEY")

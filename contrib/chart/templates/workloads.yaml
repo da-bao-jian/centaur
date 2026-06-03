@@ -517,6 +517,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "centaur.secretEnvName" . }}
                   key: {{ printf "%sSLACK_BOT_TOKEN" .Values.secretManager.envPrefix }}
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "centaur.secretEnvName" . }}
+                  key: {{ printf "%sSLACK_APP_TOKEN" .Values.secretManager.envPrefix }}
+                  optional: true
             - name: SLACK_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:

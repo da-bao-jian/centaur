@@ -3,6 +3,7 @@ import { z } from 'zod'
 const EnvSchema = z.object({
   NODE_ENV: z.string().default('development'),
   PORT: z.coerce.number().int().positive().default(3001),
+  SLACK_APP_TOKEN: z.string().optional(),
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_API_URL: z.string().url().optional(),
   SLACK_SIGNING_SECRET: z.string().optional(),

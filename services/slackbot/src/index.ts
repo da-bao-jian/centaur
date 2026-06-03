@@ -25,6 +25,7 @@ import { EnvSlackInstallationStore, SlackClientResolver } from './slack/installa
 import { normalizeSlackEnvelope } from './slack/normalize'
 import { markdownToStreamChunks } from './slack/render'
 import { verifySlackSignature } from './slack/signature'
+import { startSlackSocketMode } from './slack/socket-mode'
 import { shouldAckWithReaction } from './slack/trivial-ack'
 import type { NormalizedSlackEvent, SlackEnvelope } from './slack/types'
 import type { AnyBlock, AnyChunk } from '@slack/types'
@@ -54,6 +55,14 @@ void resolver
     logError('final_delivery_poller_start_failed', error)
   })
 
+void startSlackSocketMode({
+  appToken: config.SLACK_APP_TOKEN,
+  slackApiUrl: config.SLACK_API_URL,
+  processEnvelope: envelope => acceptSlackEnvelope(envelope, runWithoutExecutionContext).then(() => {})
+}).catch(error => {
+  logError('slack_socket_mode_start_failed', error)
+})
+
 type Variables = {
   slackRawBody: string
 }
@@ -61,6 +70,8 @@ type Variables = {
 type WaitUntilContext = {
   waitUntil(promise: Promise<unknown>): void
 }
+
+type BackgroundScheduler = (promise: Promise<void>) => void
 
 export const app = new Hono<{ Variables: Variables }>()
   .use(prettyJSON())
@@ -146,6 +157,14 @@ const slackHandler = async (c: Context<{ Variables: Variables }>) => {
     return c.text(envelope.challenge)
   }
 
+  const accepted = await acceptSlackEnvelope(envelope, promise => runInBackground(c, promise))
+  return c.json(accepted)
+}
+
+async function acceptSlackEnvelope(
+  envelope: SlackEnvelope,
+  scheduleBackground: BackgroundScheduler
+): Promise<{ ok: true; duplicate?: true }> {
   const event = envelope.event
   const key = slackDedupKey({
     eventId: envelope.event_id,
@@ -165,13 +184,13 @@ const slackHandler = async (c: Context<{ Variables: Variables }>) => {
       }
     )
     if (deploymentAlertChannel) {
-      runInBackground(c, notifyDuplicateSlackAlert(duplicate))
+      scheduleBackground(notifyDuplicateSlackAlert(duplicate))
     }
-    return c.json({ ok: true, duplicate: true })
+    return { ok: true, duplicate: true }
   }
 
-  runInBackground(c, processSlackEvent(envelope))
-  return c.json({ ok: true })
+  scheduleBackground(processSlackEvent(envelope))
+  return { ok: true }
 }
 
 app.post(config.CENTAUR_SLACK_EVENTS_PATH, slackSignatureMiddleware, slackHandler)
@@ -779,10 +798,20 @@ function firstLineTitle(text: string): string {
 }
 
 function runInBackground(c: Context, promise: Promise<void>): void {
+  scheduleBackgroundPromise(promise, getExecutionContext(c))
+}
+
+function runWithoutExecutionContext(promise: Promise<void>): void {
+  scheduleBackgroundPromise(promise, null)
+}
+
+function scheduleBackgroundPromise(
+  promise: Promise<void>,
+  executionCtx: WaitUntilContext | null
+): void {
   const guarded = promise.catch((error: unknown) => {
     logError('slack_event_processing_failed', error)
   })
-  const executionCtx = getExecutionContext(c)
   if (executionCtx) {
     executionCtx.waitUntil(guarded)
     return
