@@ -84,6 +84,12 @@ def _token_broker_ttl() -> str:
     return os.environ.get("FIREWALL_MANAGER_TOKEN_BROKER_TTL", "1m").strip()
 
 
+def _token_broker_enabled() -> bool:
+    """Return true when the chart has wired a token broker into this API pod."""
+
+    return bool(os.environ.get("KUBERNETES_TOKEN_BROKER_URL", "").strip())
+
+
 def _op_vault() -> str:
     return os.environ.get("OP_VAULT", "ai-agents").strip()
 
@@ -207,6 +213,9 @@ def _build_token_broker_entries(
     into a single entry so the broker only sees one ``credential_id`` per
     refresh family.
     """
+    if not _token_broker_enabled():
+        return []
+
     by_name: dict[str, set[str]] = {}
     for secret in secrets:
         if isinstance(secret, BrokeredTokenSecret):

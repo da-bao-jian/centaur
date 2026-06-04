@@ -1699,6 +1699,7 @@ def test_render_brokered_token_emits_token_broker_source(
 
     monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
     monkeypatch.setenv("FIREWALL_MANAGER_TOKEN_BROKER_TTL", "30s")
+    monkeypatch.setenv("KUBERNETES_TOKEN_BROKER_URL", "http://token-broker:8181")
     secrets = [
         BrokeredTokenSecret(
             name="openai-codex",
@@ -1726,6 +1727,30 @@ def test_render_brokered_token_emits_token_broker_source(
     assert entry["rules"] == [{"host": "auth.openai.com"}]
 
 
+def test_render_brokered_token_skips_token_broker_source_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tool_manager import BrokeredTokenSecret
+
+    monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    monkeypatch.delenv("KUBERNETES_TOKEN_BROKER_URL", raising=False)
+    secrets = [
+        BrokeredTokenSecret(
+            name="openai-codex",
+            hosts=("auth.openai.com",),
+            fields=_BROKERED_FIELDS,
+            token_endpoint="https://auth.openai.com/oauth/token",
+        ),
+    ]
+    cfg = yaml.safe_load(render_proxy_yaml(secrets))
+    secrets_block = next(
+        (t for t in cfg["transforms"] if t["name"] == "secrets"),
+        None,
+    )
+    assert secrets_block is None
+    assert not any(t["name"] == "oauth_token" for t in cfg["transforms"])
+
+
 def test_render_refresh_token_oauth_secret_stays_on_oauth_transform() -> None:
     # Bare OAuthTokenSecret with refresh_token grant no longer routes through
     # the broker — tools must opt in by declaring `brokered_token` instead.
@@ -1748,6 +1773,7 @@ def test_render_brokered_and_oauth_coexist(
     from api.tool_manager import BrokeredTokenSecret
 
     monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    monkeypatch.setenv("KUBERNETES_TOKEN_BROKER_URL", "http://token-broker:8181")
     secrets = [
         OAuthTokenSecret(
             name="api-app",
@@ -1784,6 +1810,7 @@ def test_render_brokered_token_merges_hosts_across_duplicate_names(
     from api.tool_manager import BrokeredTokenSecret
 
     monkeypatch.setenv("FIREWALL_MANAGER_SECRET_SOURCE", "env")
+    monkeypatch.setenv("KUBERNETES_TOKEN_BROKER_URL", "http://token-broker:8181")
     secrets = [
         BrokeredTokenSecret(
             "claude", ("api.anthropic.com",), _BROKERED_FIELDS,
