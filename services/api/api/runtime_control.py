@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import datetime as dt
 import hashlib
 import json
 import os
-import pathlib
 import uuid
 from typing import Any
 
@@ -25,6 +23,7 @@ from api.agent import (
     stop_session,
 )
 from api import slackbot_client
+from api.attachments.processor import AttachmentDecodeError, AttachmentProcessor
 from api.harness_config import default_harness
 from api.otel import (
     add_span_event,
@@ -63,11 +62,15 @@ from api.sandbox.harness_protocol import extract_result
 from api.sandbox.registry import get_backend
 
 log = structlog.get_logger()
+_ATTACHMENT_PROCESSOR = AttachmentProcessor()
 
 _SLACKBOT_LIVE_DELIVERY_METADATA_KEY = "slackbot_live_delivery"
 _LEGACY_SLACKBOT_LIVE_DELIVERY_METADATA_KEY = "slackbot" + "_v" + "2_live_delivery"
 
 EXECUTION_SILENCE_TIMEOUT_S = int(os.getenv("EXECUTION_SILENCE_TIMEOUT_S", "600"))
+EXECUTION_SILENCE_TIMEOUT_MAX_S = int(
+    os.getenv("EXECUTION_SILENCE_TIMEOUT_MAX_S", "2400")
+)
 EXECUTION_TOOL_SILENCE_TIMEOUT_S = int(
     os.getenv("EXECUTION_TOOL_SILENCE_TIMEOUT_S", "1800")
 )
@@ -129,6 +132,7 @@ _RAW_HARNESS_AUTH_SAFE_FAILURE_MESSAGE = (
     "The agent hit a temporary runtime startup issue and could not complete the turn. "
     "Please retry in a moment."
 )
+_SILENCE_TIMEOUT_METADATA_KEY = "silence_timeout_s"
 _OTEL_METADATA_KEY = "_otel"
 _OTEL_EXECUTION_SPAN_CONTEXT_KEY = "execution_span_context"
 
@@ -180,6 +184,36 @@ def _matches_user_cancelled(*values: str | None) -> bool:
     return False
 
 
+def _silence_timeout_streak(rows: list[Any]) -> int:
+    """Count silence-deadline failures since the thread's last completed turn.
+
+    *rows* is the thread's execution history, most recent first. The streak
+    feeds the exponential timeout escalation: a task that timed out making no
+    visible progress will likely need longer on retry, so each retry doubles
+    the silence window (capped by EXECUTION_SILENCE_TIMEOUT_MAX_S). A
+    completed execution resets the streak; other failure reasons (e.g.
+    harness_error) neither count nor reset it.
+    """
+    streak = 0
+    for row in rows:
+        if row["status"] == "completed":
+            break
+        if row["terminal_reason"] == "silence_deadline_exceeded":
+            streak += 1
+    return streak
+
+
+def _escalated_silence_timeout_s(streak: int) -> float:
+    if streak <= 0:
+        return float(EXECUTION_SILENCE_TIMEOUT_S)
+    timeout_s = float(EXECUTION_SILENCE_TIMEOUT_S) * (2**streak)
+    return min(
+        timeout_s,
+        float(EXECUTION_SILENCE_TIMEOUT_MAX_S),
+        float(EXECUTION_HARD_TIMEOUT_S),
+    )
+
+
 def _raw_harness_auth_retry_attempt(metadata: dict[str, Any]) -> int:
     retry_metadata = metadata.get(_RAW_HARNESS_AUTH_RETRY_METADATA_KEY)
     if not isinstance(retry_metadata, dict):
@@ -216,17 +250,18 @@ def _agent_session_title(
 
 # ── Per-message header (rendered italic at the top of every assistant message) ──
 
-_DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+_DEFAULT_CLAUDE_MODEL = "claude-fable-5"
 
 _CLAUDE_MODEL_ALIASES: dict[str, str] = {
-    "opus": _DEFAULT_CLAUDE_MODEL,
+    "fable": "claude-fable-5",
+    "opus": "claude-opus-4-8",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5",
 }
 
 
 def _resolve_claude_model_label(model: str | None) -> str:
-    raw = (model or os.getenv("CLAUDE_MODEL") or "opus").strip().lower()
+    raw = (model or os.getenv("CLAUDE_MODEL") or _DEFAULT_CLAUDE_MODEL).strip().lower()
     if raw.startswith("claude-"):
         return raw
     return _CLAUDE_MODEL_ALIASES.get(raw, raw or _DEFAULT_CLAUDE_MODEL)
@@ -378,18 +413,6 @@ async def _merge_execution_metadata(
         canonical_json(metadata),
         execution_id,
     )
-
-
-def _attachment_name_from_source_path(
-    source_path: str | None, attachment_id: str
-) -> str:
-    if not source_path:
-        return f"{attachment_id}.bin"
-    with contextlib.suppress(Exception):
-        parsed = pathlib.PurePosixPath(source_path)
-        if parsed.name:
-            return parsed.name
-    return f"{attachment_id}.bin"
 
 
 def _metadata_platform(metadata: dict[str, Any]) -> str | None:
@@ -763,93 +786,19 @@ async def extract_inline_attachments(
     chat_message_id: str,
     parts: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    transformed: list[dict[str, Any]] = []
-    attachment_ids: list[str] = []
-
-    for part in parts:
-        source = part.get("source") if isinstance(part, dict) else None
-        if (
-            isinstance(source, dict)
-            and source.get("type") == "base64"
-            and isinstance(source.get("data"), str)
-        ):
-            media_type = str(source.get("media_type") or "application/octet-stream")
-            try:
-                raw = base64.b64decode(source["data"])
-            except Exception as exc:
-                raise ControlPlaneError(
-                    "INVALID_BASE64_ATTACHMENT",
-                    f"invalid base64 attachment: {exc}",
-                    422,
-                ) from exc
-            attachment_id = f"att-{uuid.uuid4().hex[:16]}"
-            source_path = (
-                part.get("source_path")
-                if isinstance(part.get("source_path"), str)
-                else None
-            )
-            name = (
-                str(part.get("name"))
-                if isinstance(part.get("name"), str) and part.get("name")
-                else _attachment_name_from_source_path(source_path, attachment_id)
-            )
-            await pool.execute(
-                "INSERT INTO attachments (id, thread_key, message_id, name, mime_type, data) "
-                "VALUES ($1, $2, $3, $4, $5, $6)",
-                attachment_id,
-                thread_key,
-                chat_message_id,
-                name,
-                media_type,
-                raw,
-            )
-            transformed.append(
-                {
-                    "type": "attachment_ref",
-                    "attachment_id": attachment_id,
-                    "media_type": media_type,
-                    "name": name,
-                    **({"source_path": source_path} if source_path else {}),
-                }
-            )
-            attachment_ids.append(attachment_id)
-            continue
-
-        transformed.append(part)
-
-    return transformed, attachment_ids
+    try:
+        return await _ATTACHMENT_PROCESSOR.extract_inline_parts(
+            pool,
+            thread_key=thread_key,
+            chat_message_id=chat_message_id,
+            parts=parts,
+        )
+    except AttachmentDecodeError as exc:
+        raise ControlPlaneError("INVALID_BASE64_ATTACHMENT", str(exc), 422) from exc
 
 
 def event_to_chat_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    chat_parts: list[dict[str, Any]] = []
-    for part in parts:
-        part_type = part.get("type")
-        if part_type == "text":
-            chat_parts.append({"type": "text", "text": str(part.get("text") or "")})
-        elif part_type == "attachment_ref":
-            attachment_id = str(part.get("attachment_id") or "")
-            media_type = str(part.get("media_type") or "application/octet-stream")
-            source_path = (
-                part.get("source_path")
-                if isinstance(part.get("source_path"), str)
-                else None
-            )
-            name = (
-                str(part.get("name"))
-                if isinstance(part.get("name"), str) and part.get("name")
-                else _attachment_name_from_source_path(source_path, attachment_id)
-            )
-            chat_parts.append(
-                {
-                    "type": "attachment_ref",
-                    "id": attachment_id,
-                    "name": name,
-                    "mime_type": media_type,
-                }
-            )
-        else:
-            chat_parts.append(part)
-    return chat_parts
+    return _ATTACHMENT_PROCESSOR.event_parts_to_chat_parts(parts)
 
 
 async def append_message(
@@ -1462,6 +1411,27 @@ async def _enqueue_execution_impl(
                         f"Recent reasons: {', '.join(reasons)}"
                     ),
                     409,
+                )
+
+            recent_executions = await conn.fetch(
+                "SELECT status, terminal_reason FROM agent_execution_requests "
+                "WHERE thread_key = $1 ORDER BY created_at DESC LIMIT 8",
+                thread_key,
+            )
+            timeout_streak = _silence_timeout_streak(recent_executions)
+            if timeout_streak:
+                silence_timeout_s = _escalated_silence_timeout_s(timeout_streak)
+                metadata = {
+                    **metadata,
+                    _SILENCE_TIMEOUT_METADATA_KEY: silence_timeout_s,
+                }
+                silence_deadline = now + dt.timedelta(seconds=silence_timeout_s)
+                log.info(
+                    "execution_silence_timeout_escalated",
+                    execution_id=execution_id,
+                    thread_key=thread_key,
+                    timeout_streak=timeout_streak,
+                    silence_timeout_s=silence_timeout_s,
                 )
 
             await conn.execute(
@@ -2484,7 +2454,8 @@ async def _claim_next_execution(pool) -> dict[str, Any] | None:
                     "claimed_at = NOW(), "
                     "started_at = COALESCE(er.started_at, NOW()), "
                     "last_progress_at = NOW(), "
-                    "silence_deadline_at = NOW() + make_interval(secs => $1::double precision), "
+                    "silence_deadline_at = NOW() + make_interval(secs => COALESCE("
+                    "  (er.metadata->>'silence_timeout_s')::double precision, $1)), "
                     "hard_deadline_at = CASE "
                     "  WHEN er.claimed_at IS NULL THEN NOW() + make_interval(secs => $5::double precision) "
                     "  ELSE er.hard_deadline_at "
