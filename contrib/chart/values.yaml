@@ -111,7 +111,7 @@ api:
     tag: latest
     pullPolicy: Always
   executionWorkerEnabled: false
-  defaultHarness: codex
+  defaultHarness: claude-code
   # The API's worker claims workflow_runs and spawns a per-run sandbox to
   # execute each handler. Disable only if you're running your own claimer.
   workflowWorkerEnabled: true

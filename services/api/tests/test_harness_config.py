@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 
-def test_default_harness_defaults_to_codex(monkeypatch):
+def test_default_harness_defaults_to_claude_code(monkeypatch):
     from api.harness_config import default_harness
 
     monkeypatch.delenv("CENTAUR_DEFAULT_HARNESS", raising=False)
 
-    assert default_harness() == "codex"
+    assert default_harness() == "claude-code"
 
 
 def test_default_harness_supports_aliases(monkeypatch):
@@ -24,4 +24,4 @@ def test_default_harness_ignores_unknown_values(monkeypatch):
 
     monkeypatch.setenv("CENTAUR_DEFAULT_HARNESS", "unknown")
 
-    assert default_harness() == "codex"
+    assert default_harness() == "claude-code"
