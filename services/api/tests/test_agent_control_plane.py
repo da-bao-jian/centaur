@@ -61,16 +61,16 @@ async def _insert_assignment(db_pool, thread_key: str, generation: int = 1) -> N
 
 
 @pytest.mark.asyncio
-async def test_spawn_assignment_defaults_to_codex_when_no_selector(db_pool, monkeypatch):
+async def test_spawn_assignment_defaults_to_claude_code_when_no_selector(db_pool, monkeypatch):
     from api.runtime_control import spawn_assignment
 
     monkeypatch.delenv("CENTAUR_DEFAULT_HARNESS", raising=False)
-    thread_key = f"slack:C-test:{uuid.uuid4().hex}:default-codex"
+    thread_key = f"slack:C-test:{uuid.uuid4().hex}:default-claude-code"
     session = SandboxSession(
         sandbox_id=f"rt-{uuid.uuid4().hex[:8]}",
         thread_key=thread_key,
-        harness="codex",
-        engine="codex",
+        harness="claude-code",
+        engine="claude-code",
     )
     get_or_spawn = AsyncMock(return_value=session)
 
@@ -85,15 +85,15 @@ async def test_spawn_assignment_defaults_to_codex_when_no_selector(db_pool, monk
             agents_md_override=None,
         )
 
-    get_or_spawn.assert_awaited_once_with(thread_key, "codex", engine=None)
+    get_or_spawn.assert_awaited_once_with(thread_key, "claude-code", engine=None)
     assert result["persona_id"] is None
     assignment = await db_pool.fetchrow(
         "SELECT harness, engine, persona_id FROM agent_runtime_assignments WHERE thread_key = $1",
         thread_key,
     )
     assert assignment is not None
-    assert assignment["harness"] == "codex"
-    assert assignment["engine"] == "codex"
+    assert assignment["harness"] == "claude-code"
+    assert assignment["engine"] == "claude-code"
     assert assignment["persona_id"] is None
 
 

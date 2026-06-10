@@ -118,7 +118,7 @@ async def test_title_uses_default_harness_when_nothing_is_known(monkeypatch):
     title = await workflow_engine._compute_agent_session_title(
         pool=object(), thread_key="slack:T:C:1.0", selector=selector,
     )
-    assert title == "Centaur · codex"
+    assert title == "Centaur · claude-code"
 
 
 @pytest.mark.asyncio

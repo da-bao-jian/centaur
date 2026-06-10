@@ -14,5 +14,5 @@ _DEFAULT_HARNESS_ALIASES: dict[str, str] = {
 
 
 def default_harness() -> str:
-    raw = (os.getenv("CENTAUR_DEFAULT_HARNESS") or "codex").strip().lower()
-    return _DEFAULT_HARNESS_ALIASES.get(raw, "codex")
+    raw = (os.getenv("CENTAUR_DEFAULT_HARNESS") or "claude-code").strip().lower()
+    return _DEFAULT_HARNESS_ALIASES.get(raw, "claude-code")
